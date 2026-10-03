@@ -1,0 +1,16 @@
+# cargo-fuzz build artefacts and runtime state.
+target/
+artifacts/
+coverage/
+
+# libFuzzer writes interesting inputs into corpus/<target>/ with hex-digest
+# names; keep hand-picked, descriptively named seeds only.
+corpus/*/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*
+
+# Untriaged crash inputs. Once fixed, move the input into the corpus as a named
+# regression seed (corpus/<target>/regression-<short-desc>).
+**/crash-*
+**/leak-*
+**/oom-*
+**/timeout-*
+**/slow-unit-*
