@@ -98,6 +98,24 @@ jobs:
       - name: cargo check --all-features --lib
         run: cargo check --all-features --lib
 
+  # Benchmarks are only run on demand (`cargo bench`), but must keep compiling.
+  bench:
+    name: Benches compile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: bench
+
+      - name: cargo bench --no-run
+        run: cargo bench --no-run --all-features
+
   docs:
     name: Docs build (warnings denied)
     runs-on: ubuntu-latest
