@@ -112,7 +112,7 @@
 //! |---|---|
 //! | Booleans | [`Boolean`], [`boolean`], [`union_all`], [`clip_paths`] |
 //! | Offsetting | [`offset`], [`offset_tree`], [`offset_tagged`], [`offset_paths`], [`offset_shape`], [`opening`], [`closing`] |
-//! | Curves | [`Circle`], [`Shape`], [`Curve`], [`ArcTol`], [`Side`], [`arcs_from_tags`] |
+//! | Curves | [`Circle`], [`Shape`], [`Curve`], [`ArcTol`], [`Side`], [`arcs_from_tags`], [`curved_boolean`] |
 //! | Queries | [`locate`], [`intersects`], [`contains`], [`area2`], [`centroid`], [`distance`], [`distance_less_than`] |
 //! | Validity | [`validate`], [`validate_set`], [`check_canonical`] |
 //! | Utilities | [`fracture`], [`simplify_polygons`], [`triangulate`], [`triangulate_delaunay`], [`convex_hull`], [`minkowski_sum`], [`trapezoids`] |

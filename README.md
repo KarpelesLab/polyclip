@@ -20,6 +20,8 @@ output), usable as a standalone crate.
 - **Offsetting**: polygons with holes (round, miter, bevel, square joins), open paths
   (round, square, butt caps; closed loops), opening/closing for minimum-width enforcement,
   curved shapes.
+- **Curved booleans**: `curved_boolean` on `Shape`s keeps arcs as arcs (for Gerber/IPC-2581
+  output) with a guaranteed error bound and side.
 - **Arcs**: lines, three-point arcs, centre arcs and circles approximated within a
   tolerance on a selectable side (`Outside`, `Inside`, `Nearest`) so clearances are never
   under-estimated.
@@ -94,8 +96,10 @@ behaviour.
 - The spec's indicative target for the union of 50 000 heavily overlapping circles
   (< 300 ms) is not met (~3 s single-threaded; Clipper2 needs minutes on the same input).
   Realistic zone fills, offsets and distance queries meet their targets.
-- Arcs are approximated (with a guaranteed error side) rather than handled natively by
-  the booleans; provenance tags let callers rebuild arcs afterwards (`arcs_from_tags`).
+- `curved_boolean` returns real arcs (source centre and radius) with a documented
+  deviation bound and side guarantee, but it is built on approximation plus
+  reconstruction, not an exact line/arc arrangement: near tangencies and crowded spots
+  short polyline pieces remain.
 - There is no incremental engine yet: refilling a zone recomputes it fully.
 
 ## Feature flags
