@@ -138,6 +138,7 @@ mod error;
 mod fracture;
 mod geom;
 mod hull;
+mod incremental;
 mod node;
 mod offset;
 mod par;
@@ -161,6 +162,7 @@ pub use error::{Error, Result};
 pub use fracture::{fracture, fracture_set};
 pub use geom::*;
 pub use hull::{convex_hull, convex_hull_of, minkowski_sum};
+pub use incremental::ZoneFill;
 pub use offset::{
     EndCap, Join, closing, offset, offset_paths, offset_paths_tagged, offset_paths_tree,
     offset_shape, offset_shape_tagged, offset_tagged, offset_tree, opening,

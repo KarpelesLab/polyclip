@@ -477,7 +477,7 @@ fn round_exact(base: i64, num: i128, d: i128, den: i128) -> i64 {
 /// The proper crossing of `a-b` and `c-d`, rounded to the nearest integer point (ties up),
 /// using floating point when it is provably correct and exact arithmetic otherwise.
 #[inline]
-fn rounded_crossing(a: Point, b: Point, c: Point, d: Point) -> Point {
+pub(crate) fn rounded_crossing(a: Point, b: Point, c: Point, d: Point) -> Point {
     let o3 = orient(c, d, a);
     let o4 = orient(c, d, b);
     let (num, den) = if o3 - o4 < 0 {
@@ -623,7 +623,7 @@ fn pair_pass(segs: &[(Point, Point)], bboxes: &[Rect], grid: &Grid) -> PairPass 
 
 /// How a segment relates to a candidate pixel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Rel {
+pub(crate) enum Rel {
     /// Too far to matter.
     Far,
     /// The segment meets the pixel.
@@ -634,7 +634,7 @@ enum Rel {
 }
 
 #[inline]
-fn relation(a: Point, b: Point, bb: &Rect, p: Point) -> Rel {
+pub(crate) fn relation(a: Point, b: Point, bb: &Rect, p: Point) -> Rel {
     if p.x < bb.min.x - 1 || p.x > bb.max.x + 1 || p.y < bb.min.y - 1 || p.y > bb.max.y + 1 {
         return Rel::Far;
     }

@@ -439,7 +439,11 @@ pub(crate) fn assemble(edges: Vec<DirEdge>, keep_collinear: bool) -> PolyTree {
 }
 
 /// Orders the rings canonically (children by vertex sequence, depth-first numbering).
-fn canonical_tree(rings: Vec<RawRing>, is_hole: &[bool], parent: &[Option<u32>]) -> PolyTree {
+pub(crate) fn canonical_tree(
+    rings: Vec<RawRing>,
+    is_hole: &[bool],
+    parent: &[Option<u32>],
+) -> PolyTree {
     let m = rings.len();
     let mut children: Vec<Vec<u32>> = vec![Vec::new(); m];
     let mut roots: Vec<u32> = Vec::new();
