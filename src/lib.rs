@@ -130,6 +130,7 @@ mod arc;
 mod arrangement;
 mod assemble;
 mod boolean;
+mod curved;
 mod decompose;
 mod dir;
 mod distance;
@@ -153,6 +154,7 @@ pub use boolean::{
     Boolean, ClippedPaths, FillRule, Op, PathSource, RingSource, VertexVisitor, boolean,
     clip_paths, union_all,
 };
+pub use curved::curved_boolean;
 pub use decompose::{Trapezoid, trapezoids};
 pub use distance::{Closest, SqDist, distance, distance_less_than, distance_sq};
 pub use error::{Error, Result};
