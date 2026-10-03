@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc c152481298fb14db6d61e8c4f90a96bf8b4262c4577ad28bb8be58f0e49b5c82 # shrinks to a = [Ring([Point { x: -8776, y: -3055 }, Point { x: 523, y: 3329 }, Point { x: 4872, y: -8252 }, Point { x: -7274, y: -1883 }])], d = 1230

@@ -3,22 +3,28 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+mod arc;
 mod arrangement;
 mod assemble;
 mod boolean;
 mod error;
 mod geom;
 mod node;
+mod offset;
 pub mod predicates;
 mod query;
 mod sweep;
 mod validate;
 
+pub use arc::{ArcTol, Circle, Contour, Curve, MAX_ARC_VERTICES, Shape, Side};
 pub use boolean::{
     Boolean, ClippedPaths, FillRule, Op, PathSource, RingSource, boolean, clip_paths, union_all,
 };
 pub use error::{Error, Result};
 pub use geom::*;
+pub use offset::{
+    EndCap, Join, closing, offset, offset_paths, offset_paths_tree, offset_tree, opening,
+};
 pub use query::{
     Geometry, Location, Segment, area2, centroid, contains, intersects, locate, locate_in_polygon,
     locate_in_ring, ring_area2, ring_winding,
