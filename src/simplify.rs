@@ -16,7 +16,7 @@
 //! Each accepted step keeps a valid set valid, so the whole run does. Vertices shared by
 //! several rings, or touching another ring's edge, are never removed.
 
-use crate::geom::{Path, Point, Polygon, PolygonSet, Rect};
+use crate::geom::{Path, Point, Polygon, PolygonSet, Rect, Ring};
 use crate::predicates::{
     cmp_angle, cross, dist2, dot, in_segment_interior, on_segment, orient, segments_intersect, sub,
 };
@@ -125,9 +125,73 @@ pub fn simplify_polygons(polys: &[Polygon], tolerance: i64) -> PolygonSet {
     {
         return polys.to_vec();
     }
-    let mut s = Simplifier::new(polys, tolerance.clamp(0, MAX_TOL));
+    // Work in a canonical order (rings rotated to their smallest vertex, holes and
+    // polygons sorted) so the greedy simplification does not depend on input order or
+    // ring start vertices; results are mapped back to the caller's order.
+    let rot = |r: &Ring| -> Ring {
+        let mut v = r.0.clone();
+        if let Some((i, _)) = v.iter().enumerate().min_by_key(|(_, p)| **p) {
+            v.rotate_left(i);
+        }
+        Ring(v)
+    };
+    let mut work: Vec<(Polygon, usize, Vec<usize>)> = polys
+        .iter()
+        .enumerate()
+        .map(|(pi, p)| {
+            let mut holes: Vec<(Ring, usize)> = p
+                .holes
+                .iter()
+                .enumerate()
+                .map(|(hi, h)| (rot(h), hi))
+                .collect();
+            holes.sort_by(|a, b| a.0.0.cmp(&b.0.0).then(a.1.cmp(&b.1)));
+            let order = holes.iter().map(|h| h.1).collect();
+            (
+                Polygon {
+                    outer: rot(&p.outer),
+                    holes: holes.into_iter().map(|h| h.0).collect(),
+                },
+                pi,
+                order,
+            )
+        })
+        .collect();
+    work.sort_by(|a, b| {
+        a.0.outer
+            .0
+            .cmp(&b.0.outer.0)
+            .then_with(|| {
+                a.0.holes
+                    .iter()
+                    .map(|h| &h.0)
+                    .cmp(b.0.holes.iter().map(|h| &h.0))
+            })
+            .then(a.1.cmp(&b.1))
+    });
+    let canon: Vec<Polygon> = work.iter().map(|w| w.0.clone()).collect();
+    let mut s = Simplifier::new(&canon, tolerance.clamp(0, MAX_TOL));
     s.run();
-    s.output(polys)
+    let done = s.output(&canon);
+    let mut out: Vec<Polygon> = vec![Polygon::default(); polys.len()];
+    for ((_, pi, order), mut p) in work.into_iter().zip(done) {
+        let mut holes = vec![Ring::default(); order.len()];
+        for (h, hi) in core::mem::take(&mut p.holes).into_iter().zip(order) {
+            holes[hi] = h;
+        }
+        p.holes = holes;
+        out[pi] = p;
+    }
+    // Canonical input stays canonical: keep its sort orders.
+    if polys.windows(2).all(|w| w[0].outer.0 < w[1].outer.0) {
+        out.sort_by(|a, b| a.outer.0.cmp(&b.outer.0));
+    }
+    for (p, orig) in out.iter_mut().zip(polys) {
+        if orig.holes.windows(2).all(|w| w[0].0 < w[1].0) {
+            p.holes.sort_by(|a, b| a.0.cmp(&b.0));
+        }
+    }
+    out
 }
 
 /// Result of scanning the interior vertices of a chain against its shortcut.
@@ -658,23 +722,18 @@ impl Simplifier {
         None
     }
 
+    /// Output rings in the order of `polys` (re-sorting is left to the caller).
     fn output(&self, polys: &[Polygon]) -> PolygonSet {
         let mut rings = self.rings.iter().map(|r| self.ring_output(r));
         let mut out: PolygonSet = Vec::with_capacity(polys.len());
         for poly in polys {
             let outer = rings.next().unwrap_or_default();
-            let mut holes: Vec<_> = poly
+            let holes: Vec<_> = poly
                 .holes
                 .iter()
                 .map(|_| rings.next().unwrap_or_default())
                 .collect();
-            if poly.holes.windows(2).all(|w| w[0].0 < w[1].0) {
-                holes.sort_by(|x, y| x.0.cmp(&y.0));
-            }
             out.push(Polygon::new(outer, holes));
-        }
-        if polys.windows(2).all(|w| w[0].outer.0 < w[1].outer.0) {
-            out.sort_by(|x, y| x.outer.0.cmp(&y.outer.0));
         }
         out
     }
