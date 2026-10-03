@@ -122,6 +122,13 @@ pub trait Geometry {
             f(p)
         }
     }
+    /// The first of `pts` that is not outside this geometry, if any. Geometries made of many
+    /// parts override this with a spatial index.
+    fn first_not_outside(&self, pts: &[Point]) -> Option<Point> {
+        pts.iter()
+            .copied()
+            .find(|&p| self.locate(p) != Location::Outside)
+    }
 }
 
 impl Geometry for Point {
@@ -308,6 +315,27 @@ impl Geometry for [Polygon] {
             p.component_points(f)
         }
     }
+    fn first_not_outside(&self, pts: &[Point]) -> Option<Point> {
+        if self.len() * pts.len() <= 4096 {
+            return pts
+                .iter()
+                .copied()
+                .find(|&p| self.locate(p) != Location::Outside);
+        }
+        let boxes: Vec<Rect> = self
+            .iter()
+            .map(|p| p.bbox().unwrap_or(EMPTY_RECT))
+            .collect();
+        let tree = BoxTree::build(&boxes);
+        pts.iter().copied().find(|&p| {
+            let mut hit = false;
+            tree.stab(p, &mut |i| {
+                hit = locate_in_polygon(&self[i as usize], p) != Location::Outside;
+                hit
+            });
+            hit
+        })
+    }
 }
 
 impl Geometry for Vec<Polygon> {
@@ -328,6 +356,9 @@ impl Geometry for Vec<Polygon> {
     }
     fn component_points(&self, f: &mut dyn FnMut(Point)) {
         self.as_slice().component_points(f)
+    }
+    fn first_not_outside(&self, pts: &[Point]) -> Option<Point> {
+        self.as_slice().first_not_outside(pts)
     }
 }
 
@@ -372,6 +403,33 @@ impl Geometry for PolyTree {
             }
         }
     }
+    fn first_not_outside(&self, pts: &[Point]) -> Option<Point> {
+        if self.nodes.len() * pts.len() <= 4096 {
+            return pts
+                .iter()
+                .copied()
+                .find(|&p| self.locate(p) != Location::Outside);
+        }
+        let boxes: Vec<Rect> = self
+            .nodes
+            .iter()
+            .map(|n| n.ring.bbox().unwrap_or(EMPTY_RECT))
+            .collect();
+        let tree = BoxTree::build(&boxes);
+        pts.iter().copied().find(|&p| {
+            // Odd number of enclosing rings (or on a ring) means inside.
+            let (mut count, mut on) = (0usize, false);
+            tree.stab(p, &mut |i| {
+                match locate_in_ring(&self.nodes[i as usize].ring.0, p) {
+                    Location::OnBoundary => on = true,
+                    Location::Inside => count += 1,
+                    Location::Outside => {}
+                }
+                on
+            });
+            on || count % 2 == 1
+        })
+    }
 }
 
 impl<T: Geometry + ?Sized> Geometry for &T {
@@ -392,6 +450,9 @@ impl<T: Geometry + ?Sized> Geometry for &T {
     }
     fn component_points(&self, f: &mut dyn FnMut(Point)) {
         (**self).component_points(f)
+    }
+    fn first_not_outside(&self, pts: &[Point]) -> Option<Point> {
+        (**self).first_not_outside(pts)
     }
 }
 
@@ -591,13 +652,92 @@ pub(crate) fn any_component_inside<A: Geometry + ?Sized, B: Geometry + ?Sized>(
         return None;
     }
     let ob = outer.bbox()?;
-    let mut found = None;
+    let mut pts = Vec::new();
     inner.component_points(&mut |p| {
-        if found.is_none() && ob.contains_point(p) && outer.locate(p) != Location::Outside {
-            found = Some(p);
+        if ob.contains_point(p) {
+            pts.push(p);
         }
     });
-    found
+    outer.first_not_outside(&pts)
+}
+
+const EMPTY_RECT: Rect = Rect {
+    min: Point {
+        x: i64::MAX,
+        y: i64::MAX,
+    },
+    max: Point {
+        x: i64::MIN,
+        y: i64::MIN,
+    },
+};
+
+/// A static bounding-box hierarchy answering "which boxes contain this point".
+struct BoxTree {
+    /// (box, first, count): leaves cover `order[first..first + count]`; interior nodes have
+    /// `count == 0` and children at `first`, `first + 1`.
+    nodes: Vec<(Rect, u32, u32)>,
+    order: Vec<u32>,
+}
+
+impl BoxTree {
+    fn build(boxes: &[Rect]) -> BoxTree {
+        let mut order: Vec<u32> = (0..boxes.len() as u32).collect();
+        let union = |o: &[u32]| {
+            o.iter()
+                .map(|&i| boxes[i as usize])
+                .fold(EMPTY_RECT, |a, b| a.union(&b))
+        };
+        let mut nodes = vec![(union(&order), 0u32, order.len() as u32)];
+        let mut stack = vec![0usize];
+        while let Some(ni) = stack.pop() {
+            let (b, first, count) = nodes[ni];
+            if count <= 8 {
+                continue;
+            }
+            let (first, count) = (first as usize, count as usize);
+            let part = &mut order[first..first + count];
+            let mid = count / 2;
+            if b.width() >= b.height() {
+                part.select_nth_unstable_by_key(mid, |&i| {
+                    boxes[i as usize].min.x as i128 + boxes[i as usize].max.x as i128
+                });
+            } else {
+                part.select_nth_unstable_by_key(mid, |&i| {
+                    boxes[i as usize].min.y as i128 + boxes[i as usize].max.y as i128
+                });
+            }
+            let (l, r) = (union(&part[..mid]), union(&part[mid..]));
+            let c = nodes.len() as u32;
+            nodes.push((l, first as u32, mid as u32));
+            nodes.push((r, (first + mid) as u32, (count - mid) as u32));
+            nodes[ni] = (b, c, 0);
+            stack.push(c as usize);
+            stack.push(c as usize + 1);
+        }
+        BoxTree { nodes, order }
+    }
+
+    /// Calls `f(i)` for every box containing `p`, stopping when `f` returns `true`.
+    fn stab(&self, p: Point, f: &mut dyn FnMut(u32) -> bool) {
+        let mut stack = vec![0usize];
+        while let Some(ni) = stack.pop() {
+            let (b, first, count) = self.nodes[ni];
+            if !b.contains_point(p) {
+                continue;
+            }
+            if count == 0 {
+                stack.push(first as usize);
+                stack.push(first as usize + 1);
+            } else {
+                for &i in &self.order[first as usize..(first + count) as usize] {
+                    if f(i) {
+                        return;
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// `true` when every point of `b` belongs to `a` (closed sets), exactly.
