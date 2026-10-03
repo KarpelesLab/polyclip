@@ -198,6 +198,10 @@ fn main() {
         );
         return;
     }
+    if std::env::args().any(|a| a == "incremental") {
+        incremental_bench();
+        return;
+    }
     if std::env::args().any(|a| a == "bigdist") {
         let a = circle(0, 0, 50_000_000.0, 50_000);
         let b = circle(120_000_000, 0, 50_000_000.0, 50_000);
@@ -353,4 +357,119 @@ fn distance_bench() {
         pairs.len(),
         t.elapsed() / pairs.len().max(1) as u32
     );
+}
+
+/// Incremental zone refill: 100 mm zone − 5000 obstacles, then single and batched edits.
+fn incremental_bench() {
+    let mut s = 42u64;
+    let zone = Ring::from([
+        (0, 0),
+        (100_000_000, 0),
+        (100_000_000, 100_000_000),
+        (0, 100_000_000),
+    ]);
+    let mut obst: Vec<Ring> = (0..5000)
+        .map(|_| {
+            circle(
+                (lcg(&mut s) % 100_000_000) as i64,
+                (lcg(&mut s) % 100_000_000) as i64,
+                300_000.0,
+                32,
+            )
+        })
+        .collect();
+    let t = Instant::now();
+    let mut z = ZoneFill::new(&zone, FillRule::NonZero).unwrap();
+    for (i, o) in obst.iter().enumerate() {
+        z.insert(i as u64, o).unwrap();
+    }
+    z.commit();
+    println!("initial build: {:?}", t.elapsed());
+    let t = Instant::now();
+    let n = z.result().nodes.len();
+    println!("first materialization: {:?} ({n} rings)", t.elapsed());
+    let check = std::env::args().any(|a| a == "check");
+    let verify = |z: &mut ZoneFill, obst: &[Ring]| {
+        if check {
+            let want = boolean(Op::Difference, &zone, obst, FillRule::NonZero).unwrap();
+            assert_eq!(z.fill(), want);
+        }
+    };
+    verify(&mut z, &obst);
+    let rounds = 200;
+    let rnd = |s: &mut u64| (lcg(s) % 100_000_000) as i64;
+    // Single moves.
+    let (mut tc, mut tf) = (std::time::Duration::ZERO, std::time::Duration::ZERO);
+    for _ in 0..rounds {
+        let id = (lcg(&mut s) % 5000) as usize;
+        let r = circle(rnd(&mut s), rnd(&mut s), 300_000.0, 32);
+        let t = Instant::now();
+        z.update(id as u64, &r).unwrap();
+        z.commit();
+        tc += t.elapsed();
+        let t = Instant::now();
+        std::hint::black_box(z.result());
+        tf += t.elapsed();
+        obst[id] = r;
+    }
+    println!(
+        "single move: commit {:?}, + result() {:?}, + fill() n/a",
+        tc / rounds,
+        tf / rounds
+    );
+    verify(&mut z, &obst);
+    // Single insert + remove.
+    let (mut ti, mut tr) = (std::time::Duration::ZERO, std::time::Duration::ZERO);
+    for k in 0..rounds {
+        let r = circle(rnd(&mut s), rnd(&mut s), 300_000.0, 32);
+        let id = 1_000_000 + k as u64;
+        let t = Instant::now();
+        z.insert(id, &r).unwrap();
+        z.commit();
+        ti += t.elapsed();
+        let t = Instant::now();
+        z.remove(id);
+        z.commit();
+        tr += t.elapsed();
+    }
+    println!(
+        "single insert: {:?}, single remove: {:?}",
+        ti / rounds,
+        tr / rounds
+    );
+    verify(&mut z, &obst);
+    let t = Instant::now();
+    for _ in 0..20 {
+        std::hint::black_box(z.fill());
+    }
+    println!(
+        "fill() materialization (cached tree -> PolygonSet): {:?}",
+        t.elapsed() / 20
+    );
+    if std::env::args().any(|a| a == "noauto") {
+        z.set_auto_rebuild(false);
+    }
+    for batch in [10usize, 100, 1000, 2500] {
+        let reps = (2000 / batch).clamp(2, 50) as u32;
+        let t = Instant::now();
+        for _ in 0..reps {
+            for _ in 0..batch {
+                let id = (lcg(&mut s) % 5000) as usize;
+                let r = circle(rnd(&mut s), rnd(&mut s), 300_000.0, 32);
+                z.update(id as u64, &r).unwrap();
+                obst[id] = r;
+            }
+            z.commit();
+        }
+        println!(
+            "batch of {batch} moves: {:?} per batch (rebuilds so far: {})",
+            t.elapsed() / reps,
+            z.rebuild_count()
+        );
+    }
+    verify(&mut z, &obst);
+    let t = Instant::now();
+    let d = boolean(Op::Difference, &zone, &obst, FillRule::NonZero).unwrap();
+    println!("from-scratch boolean: {:?}", t.elapsed());
+    std::hint::black_box(d);
 }

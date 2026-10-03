@@ -17,6 +17,9 @@
 //! * `distance_less_than`: DRC-style threshold queries between 64-vertex polygons (target
 //!   < 1 µs on average including bounding-box rejection), and between near pairs only.
 //! * `zone_pipeline`: fracture and triangulation of the zone-fill result.
+//! * `zone_incremental`: the same zone workload in an incremental [`ZoneFill`] engine:
+//!   building it, then moving obstacles one at a time or in batches (commit only, and
+//!   commit plus materializing the result), and inserting + removing one obstacle.
 //! * `pathological`: 50 000 stacked axis-parallel slots and 50 000 diagonal slots (long,
 //!   dense, parallel edges).
 //!
@@ -309,6 +312,70 @@ fn pathological(c: &mut Criterion) {
     g.finish();
 }
 
+fn zone_incremental(c: &mut Criterion) {
+    let (zone, obst) = zone_and_obstacles(7);
+    let side = 100 * MM;
+    // Pre-generated destinations, cycled through (moves keep the obstacle density). Move k
+    // sends obstacle k mod 5000 to destination k mod 4093, so no (obstacle, destination)
+    // pair repeats within millions of moves and every update really changes the geometry.
+    let mut s = Lcg(99);
+    let dest: Vec<Ring> = (0..4093)
+        .map(|_| circle(s.below(side), s.below(side), 0.3 * MM as f64, 32))
+        .collect();
+    let build = || {
+        let mut z = ZoneFill::new(&zone, FillRule::NonZero).unwrap();
+        for (i, o) in obst.iter().enumerate() {
+            z.insert(i as u64, o).unwrap();
+        }
+        z.commit();
+        z
+    };
+    let mut g = c.benchmark_group("zone_incremental");
+    g.sample_size(20);
+    g.warm_up_time(Duration::from_millis(500));
+    g.measurement_time(Duration::from_secs(3));
+    g.bench_function("build_5000", |b| b.iter(|| black_box(build())));
+    let mut z = build();
+    let mut k = 0usize;
+    let mut next = |z: &mut ZoneFill| {
+        let id = (k % obst.len()) as u64;
+        z.update(id, &dest[k % dest.len()]).unwrap();
+        k += 1;
+    };
+    g.bench_function("move_1", |b| {
+        b.iter(|| {
+            next(&mut z);
+            z.commit();
+        })
+    });
+    g.bench_function("move_1_then_fill", |b| {
+        b.iter(|| {
+            next(&mut z);
+            black_box(z.fill())
+        })
+    });
+    let other = circle(side / 3, side / 3, 0.3 * MM as f64, 32);
+    g.bench_function("insert_remove_1", |b| {
+        b.iter(|| {
+            z.insert(u64::MAX, &other).unwrap();
+            z.commit();
+            z.remove(u64::MAX);
+            z.commit();
+        })
+    });
+    for n in [10usize, 100] {
+        g.bench_function(BenchmarkId::new("move_batch", n), |b| {
+            b.iter(|| {
+                for _ in 0..n {
+                    next(&mut z);
+                }
+                z.commit();
+            })
+        });
+    }
+    g.finish();
+}
+
 criterion_group!(
     benches,
     union_circles,
@@ -317,6 +384,7 @@ criterion_group!(
     offset_10k,
     distance_queries,
     zone_pipeline,
+    zone_incremental,
     pathological
 );
 criterion_main!(benches);
