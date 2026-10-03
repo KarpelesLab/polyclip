@@ -16,6 +16,7 @@
 //! listed in every cell it passes within distance 1 of, so any two segments meeting near a
 //! point are both listed in that point's cell.
 
+use crate::dir::Dir;
 use crate::geom::{Point, Rect};
 use crate::predicates::{
     dot, floor_div, in_segment_interior, orient, segment_meets_rect, segment_pixel_entry,
@@ -98,7 +99,15 @@ impl Grid {
         let typical = *ext.select_nth_unstable(mid).1;
         // At most about one cell per segment.
         let s_min = libm::ceil(libm::sqrt(w * h / (n as f64 + 16.0)));
-        let s = (typical as f64).max(s_min).max(1.0).min(w.max(h)) as i64;
+        let mut s = (typical as f64).max(s_min).max(1.0).min(w.max(h)) as i64;
+        // Bound the number of cells too (a thin, wide box would otherwise need a huge
+        // grid): at most about four cells per segment.
+        let cells = |s: i64| {
+            ((bb.max.x - bb.min.x) / s + 1) as u128 * ((bb.max.y - bb.min.y) / s + 1) as u128
+        };
+        while cells(s) > 4 * n as u128 + 64 {
+            s = s.saturating_mul(2);
+        }
         let nx = ((bb.max.x - bb.min.x) / s + 1) as usize;
         let ny = ((bb.max.y - bb.min.y) / s + 1) as usize;
         let (x0, y0) = (bb.min.x, bb.min.y);
@@ -324,59 +333,12 @@ impl Grid {
     }
 }
 
-/// A projection direction for sweep-and-prune: x, y, or one of the diagonals (`x + y`,
-/// `x - y`). All are exact integer projections.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Dir {
-    X,
-    Y,
-    D1,
-    D2,
-}
-
-impl Dir {
-    const ALL: [Dir; 4] = [Dir::X, Dir::Y, Dir::D1, Dir::D2];
-
-    #[inline]
-    fn proj(self, p: Point) -> i64 {
-        match self {
-            Dir::X => p.x,
-            Dir::Y => p.y,
-            Dir::D1 => p.x + p.y,
-            Dir::D2 => p.x - p.y,
-        }
-    }
-
-    /// Projected interval of a segment.
-    #[inline]
-    fn range(self, s: &(Point, Point)) -> (i64, i64) {
-        let (a, b) = (self.proj(s.0), self.proj(s.1));
-        (a.min(b), a.max(b))
-    }
-
-    /// The direction along which the segments' projections are thinnest in total.
-    fn best(segs: &[(Point, Point)], items: &[u32]) -> Dir {
-        let mut w = [0i128; 4];
-        for &i in items {
-            let s = &segs[i as usize];
-            for (k, d) in Dir::ALL.iter().enumerate() {
-                let (lo, hi) = d.range(s);
-                // Diagonal projections stretch distances by sqrt(2): weight 7/10 ≈ 1/sqrt(2).
-                let len = (hi - lo) as i128;
-                w[k] += if k < 2 { 10 * len } else { 7 * len };
-            }
-        }
-        let k = (0..4).min_by_key(|&k| w[k]).unwrap();
-        Dir::ALL[k]
-    }
-}
-
 /// Calls `f(i, j)` for every pair of segments in the cell whose bounding boxes overlap.
 fn for_each_pair(
     segs: &[(Point, Point)],
     items: &[u32],
     bboxes: &[Rect],
-    order: &mut Vec<(i64, i64, u32)>,
+    order: &mut Vec<(i128, i128, u32)>,
     mut f: impl FnMut(u32, u32),
 ) {
     if items.len() <= 24 {
@@ -642,7 +604,7 @@ struct Snap<'a> {
     leaf_queue: Vec<u32>,
     px_queue: Vec<u32>,
     seg_queue: Vec<u32>,
-    by_d: Vec<(i64, u32)>,
+    by_d: Vec<(i128, u32)>,
 }
 
 const NIL: u32 = u32::MAX;
@@ -697,7 +659,7 @@ impl<'a> Snap<'a> {
     fn leaf_relations(
         &self,
         c: usize,
-        by_d: &mut Vec<(i64, u32)>,
+        by_d: &mut Vec<(i128, u32)>,
         found: &mut Vec<(u32, u32, Rel)>,
     ) {
         let base = self.pstart[c] as usize;
@@ -741,11 +703,12 @@ impl<'a> Snap<'a> {
                 let to = from + cp[from..].partition_point(|p| p.x <= bb.max.x + 1);
                 (from..to).for_each(&mut test);
             } else {
-                // Pixels within distance 1 of the segment project within 2 units of its
+                // Pixels within distance 1 of the segment project within the margin of its
                 // projected range.
                 let (lo, hi) = dir.range(&(a, b));
-                let from = by_d.partition_point(|x| x.0 < lo - 2);
-                let to = from + by_d[from..].partition_point(|x| x.0 <= hi + 2);
+                let m = dir.margin();
+                let from = by_d.partition_point(|x| x.0 < lo - m);
+                let to = from + by_d[from..].partition_point(|x| x.0 <= hi + m);
                 by_d[from..to].iter().for_each(|&(_, k)| test(k as usize));
             }
         }

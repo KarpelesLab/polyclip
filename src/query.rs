@@ -447,8 +447,75 @@ pub(crate) fn any_pair(
         }
         return false;
     }
-    // Sweep-and-prune along x: merge both lists by min x, keeping for each side the items
-    // whose x-extent still reaches the sweep position.
+    // Sweep-and-prune along the direction where the segments are thinnest (axes,
+    // diagonals or the normal of the longest segment): merge both lists by projected start,
+    // keeping for each side the items whose projected extent still reaches the sweep.
+    // Small inputs: sweep along x in place (the direction analysis would cost more than it
+    // saves).
+    if sa.len() + sb.len() < 512 {
+        return x_sweep(sa, sb, margin, f);
+    }
+    let dir = crate::dir::separating(sa.iter().map(|s| (s.0, s.1)), sb.iter().map(|s| (s.0, s.1)));
+    // Segments within distance `margin` have projections at most `margin * |n|` apart.
+    let m: i128 = if margin > 0 {
+        libm::ceil(margin as f64 * libm::hypot(dir.nx as f64, dir.ny as f64)) as i128 + 1
+    } else {
+        0
+    };
+    let proj = |v: &[(Point, Point, Rect)]| -> Vec<(i128, i128, usize)> {
+        let mut p: Vec<(i128, i128, usize)> = v
+            .iter()
+            .enumerate()
+            .map(|(k, s)| {
+                let (lo, hi) = dir.range(&(s.0, s.1));
+                (lo, hi, k)
+            })
+            .collect();
+        p.sort_unstable();
+        p
+    };
+    let (pa, pb) = (proj(sa), proj(sb));
+    let (mut i, mut j) = (0usize, 0usize);
+    let mut act_a: Vec<(i128, usize)> = Vec::new();
+    let mut act_b: Vec<(i128, usize)> = Vec::new();
+    while i < pa.len() || j < pb.len() {
+        let take_a = j >= pb.len() || (i < pa.len() && pa[i].0 <= pb[j].0);
+        if take_a {
+            let (lo, hi, k) = pa[i];
+            let x = &sa[k];
+            let rx = x.2.expand(margin);
+            act_b.retain(|&(h, _)| h + m >= lo);
+            for &(_, kb) in &act_b {
+                if rx.intersects(&sb[kb].2) && f(x, &sb[kb]) {
+                    return true;
+                }
+            }
+            act_a.push((hi, k));
+            i += 1;
+        } else {
+            let (lo, hi, k) = pb[j];
+            let y = &sb[k];
+            let ry = y.2.expand(margin);
+            act_a.retain(|&(h, _)| h + m >= lo);
+            for &(_, ka) in &act_a {
+                if ry.intersects(&sa[ka].2) && f(&sa[ka], y) {
+                    return true;
+                }
+            }
+            act_b.push((hi, k));
+            j += 1;
+        }
+    }
+    false
+}
+
+/// Sweep-and-prune along x, sorting the lists in place.
+fn x_sweep(
+    sa: &mut [(Point, Point, Rect)],
+    sb: &mut [(Point, Point, Rect)],
+    margin: i64,
+    mut f: impl FnMut(&(Point, Point, Rect), &(Point, Point, Rect)) -> bool,
+) -> bool {
     sa.sort_unstable_by_key(|s| s.2.min.x);
     sb.sort_unstable_by_key(|s| s.2.min.x);
     let (mut i, mut j) = (0usize, 0usize);

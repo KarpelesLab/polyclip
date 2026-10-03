@@ -61,6 +61,20 @@ impl Status {
         }
     }
 
+    /// The edge `skip` positions after `(b, i)` (if any).
+    fn after(&self, mut b: usize, mut i: usize, mut skip: usize) -> Option<u32> {
+        while b < self.blocks.len() {
+            let len = self.blocks[b].len();
+            if i + skip < len {
+                return Some(self.blocks[b][i + skip]);
+            }
+            skip -= len.saturating_sub(i).min(skip);
+            b += 1;
+            i = 0;
+        }
+        None
+    }
+
     /// Copies the `count` edges starting at `(b, i)` into `out`.
     fn collect(&self, mut b: usize, mut i: usize, mut count: usize, out: &mut Vec<u32>) {
         out.clear();
@@ -131,7 +145,7 @@ impl Status {
 /// `on_insert(e, below)` is called for every edge, in sweep order and bottom to top at each
 /// vertex, with the edge immediately below it at the moment it is inserted.
 pub(crate) fn sweep(edges: &[(Point, Point)], mut on_insert: impl FnMut(u32, Option<u32>)) {
-    sweep_events(edges, |below, _, starting| {
+    sweep_events(edges, |below, _, _, starting| {
         for k in starting.clone() {
             let bl = if k == starting.start {
                 below
@@ -143,12 +157,13 @@ pub(crate) fn sweep(edges: &[(Point, Point)], mut on_insert: impl FnMut(u32, Opt
     });
 }
 
-/// Like [`sweep`], with one call per vertex: `on_event(below, ending, starting)` receives
-/// the edge just below the vertex (after removing the edges ending there), the edges ending
-/// at the vertex (bottom to top) and the range of edges starting there (bottom to top).
+/// Like [`sweep`], with one call per vertex: `on_event(below, above, ending, starting)`
+/// receives the edges just below and just above the vertex (excluding the edges incident to
+/// it), the edges ending at the vertex (bottom to top) and the range of edges starting
+/// there (bottom to top).
 pub(crate) fn sweep_events(
     edges: &[(Point, Point)],
-    mut on_event: impl FnMut(Option<u32>, &[u32], Range<u32>),
+    mut on_event: impl FnMut(Option<u32>, Option<u32>, &[u32], Range<u32>),
 ) {
     let n = edges.len();
     let mut his: Vec<Point> = edges.iter().map(|e| e.1).collect();
@@ -180,7 +195,8 @@ pub(crate) fn sweep_events(
         let below = status.before(b, i);
         status.collect(b, i, ending, &mut ending_buf);
         status.splice(b, i, ending, (s0..si).map(|e| e as u32));
-        on_event(below, &ending_buf, s0 as u32..si as u32);
+        let above = status.after(b, i, si - s0);
+        on_event(below, above, &ending_buf, s0 as u32..si as u32);
     }
 }
 

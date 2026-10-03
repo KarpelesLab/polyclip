@@ -244,39 +244,120 @@ pub fn distance<A: Geometry + ?Sized, B: Geometry + ?Sized>(a: &A, b: &B) -> Opt
             });
         }
     }
-    // Nearest pair, pruning with the best distance so far.
-    sb.sort_unstable_by_key(|s| s.2.min.x);
+    // Nearest pair: branch-and-bound over a bounding-volume hierarchy of `b`, pruning with
+    // the best distance found so far.
+    let bvh = Bvh::build(&mut sb);
     let mut best = {
         let (s, p, q) = segment_segment(sa[0].0, sa[0].1, sb[0].0, sb[0].1);
         Closest { sq: s, a: p, b: q }
     };
     // Conservative integer radius bounding the current best distance.
     let radius =
-        |c: &Closest| -> i64 { (libm::ceil(c.sq.distance_f64()) as i64).saturating_add(2) };
+        |c: &Closest| -> u128 { (libm::ceil(c.sq.distance_f64()) as u128).saturating_add(2) };
     let mut r = radius(&best);
-    // Segments of `b` overlapping `x`'s grown x-range start no earlier than
-    // `x.min.x - r - max_width` in the min-x order.
-    let max_width = sb.iter().map(|s| s.2.width()).max().unwrap_or(0);
+    let mut stack: Vec<u32> = Vec::new();
     for x in &sa {
-        let lim = x.2.max.x.saturating_add(r);
-        let from_x = x.2.min.x.saturating_sub(r).saturating_sub(max_width);
-        let from = sb.partition_point(|s| s.2.min.x < from_x);
-        for y in &sb[from..] {
-            if y.2.min.x > lim {
-                break;
-            }
-            let rr = r as u128;
-            if rect_gap2(&x.2, &y.2) > rr * rr {
+        stack.clear();
+        stack.push(0);
+        while let Some(ni) = stack.pop() {
+            let node = &bvh.nodes[ni as usize];
+            if rect_gap2(&x.2, &node.bbox) > r * r {
                 continue;
             }
-            let (s, p, q) = segment_segment(x.0, x.1, y.0, y.1);
-            if s < best.sq {
-                best = Closest { sq: s, a: p, b: q };
-                r = radius(&best);
+            if node.count > 0 {
+                for y in &sb[node.first as usize..(node.first + node.count) as usize] {
+                    if rect_gap2(&x.2, &y.2) > r * r {
+                        continue;
+                    }
+                    let (s, p, q) = segment_segment(x.0, x.1, y.0, y.1);
+                    if s < best.sq {
+                        best = Closest { sq: s, a: p, b: q };
+                        r = radius(&best);
+                    }
+                }
+            } else {
+                // Visit the nearer child first (pushed last).
+                let (l, rr) = (node.first, node.first + 1);
+                let gl = rect_gap2(&x.2, &bvh.nodes[l as usize].bbox);
+                let gr = rect_gap2(&x.2, &bvh.nodes[rr as usize].bbox);
+                if gl <= gr {
+                    stack.push(rr);
+                    stack.push(l);
+                } else {
+                    stack.push(l);
+                    stack.push(rr);
+                }
             }
         }
     }
     Some(best)
+}
+
+/// A bounding-volume hierarchy over segments (reordered in place): interior nodes have
+/// `count == 0` and children at `first`, `first + 1`; leaves cover `first..first + count`.
+struct Bvh {
+    nodes: Vec<BvhNode>,
+}
+
+struct BvhNode {
+    bbox: Rect,
+    first: u32,
+    count: u32,
+}
+
+impl Bvh {
+    fn build(segs: &mut [(Point, Point, Rect)]) -> Bvh {
+        let mut nodes = vec![BvhNode {
+            bbox: bbox_of(segs),
+            first: 0,
+            count: segs.len() as u32,
+        }];
+        let mut stack = vec![0usize];
+        while let Some(ni) = stack.pop() {
+            let (first, count) = (nodes[ni].first as usize, nodes[ni].count as usize);
+            if count <= 8 {
+                continue;
+            }
+            let part = &mut segs[first..first + count];
+            let b = nodes[ni].bbox;
+            let mid = count / 2;
+            // Split at the median centre along the longer side.
+            if b.width() >= b.height() {
+                part.select_nth_unstable_by_key(mid, |s| s.2.min.x as i128 + s.2.max.x as i128);
+            } else {
+                part.select_nth_unstable_by_key(mid, |s| s.2.min.y as i128 + s.2.max.y as i128);
+            }
+            let l = nodes.len();
+            nodes.push(BvhNode {
+                bbox: bbox_of(&part[..mid]),
+                first: first as u32,
+                count: mid as u32,
+            });
+            nodes.push(BvhNode {
+                bbox: bbox_of(&part[mid..]),
+                first: (first + mid) as u32,
+                count: (count - mid) as u32,
+            });
+            nodes[ni] = BvhNode {
+                bbox: b,
+                first: l as u32,
+                count: 0,
+            };
+            stack.push(l);
+            stack.push(l + 1);
+        }
+        Bvh { nodes }
+    }
+}
+
+fn bbox_of(segs: &[(Point, Point, Rect)]) -> Rect {
+    segs.iter()
+        .map(|s| s.2)
+        .reduce(|a, b| a.union(&b))
+        .unwrap_or(Rect {
+            min: Point::new(0, 0),
+            max: Point::new(0, 0),
+        })
 }
 
 /// Exact squared minimum distance between two geometries (`None` when either is empty).

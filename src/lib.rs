@@ -119,6 +119,7 @@ mod arrangement;
 mod assemble;
 mod boolean;
 mod decompose;
+mod dir;
 mod distance;
 mod error;
 mod fracture;

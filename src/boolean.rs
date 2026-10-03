@@ -347,7 +347,7 @@ fn compute(edges: &[InEdge], inside: impl Fn([i32; 2]) -> bool) -> Vec<DirEdge> 
     let mut reg = Regions { parent: vec![0] };
     let mut out: Vec<DirEdge> = Vec::new();
     let delta = |k: usize| arr.edges[k].delta;
-    sweep_events(&segs, |below, ending, starting| {
+    sweep_events(&segs, |below, _, ending, starting| {
         let g_below = below.map_or(0, |b| gap_above[b as usize]);
         let g_above = ending.last().map_or(g_below, |&e| gap_above[e as usize]);
         if starting.is_empty() {

@@ -1,10 +1,9 @@
 //! Adversarial regression tests.
 //!
-//! Tests marked `#[ignore = "bug: ..."]` reproduce confirmed bugs (wrong results or
-//! performance / memory cliffs) and fail today; run them with
-//! `cargo test --test adversarial -- --ignored`. Remove the `#[ignore]` once fixed.
-//! The other tests are passing regression coverage for adversarial inputs that were
-//! investigated and found to be handled correctly.
+//! The first group reproduces bugs found by an adversarial review (wrong results and
+//! performance / memory cliffs), all fixed; the timing ones only run in release builds.
+//! The other tests are regression coverage for adversarial inputs that were investigated
+//! and found to be handled correctly.
 
 use polyclip::*;
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -97,8 +96,7 @@ fn max_alloc_during(f: impl FnOnce()) -> usize {
 /// `step_for` (src/arc.rs:356-361, `c = (r - t) / (r + t)`) sizes the step assuming every
 /// vertex is at `rv`, so the end chords sag `r (1 - c) ≈ 2t` inside the circle.
 #[test]
-#[ignore = "bug: Side::Nearest arcs deviate inward by up to ~2x the tolerance"]
-fn nearest_arc_chord_exceeds_tolerance() {
+fn nearest_arc_chord_within_tolerance() {
     // Pie slice, radius 1000, sweep 0.3896 rad < step 2*acos(990/1010) = 0.3987 rad: the
     // arc becomes the single chord (1000,0)-(925,380), sagitta ~18.9.
     let shape = Shape::new(
@@ -124,8 +122,7 @@ fn nearest_arc_chord_exceeds_tolerance() {
 /// true offset arc up to ~1.5x the tolerance outside the result (15.15 for tolerance 10).
 /// Root cause as in [`nearest_arc_chord_exceeds_tolerance`].
 #[test]
-#[ignore = "bug: Side::Nearest round joins deviate inward by more than the tolerance"]
-fn nearest_round_join_exceeds_tolerance() {
+fn nearest_round_join_within_tolerance() {
     let sq = rect(0, 0, 10_000, 10_000);
     let g = offset(&sq, 1000, Join::Round, ArcTol::new(10, Side::Nearest)).unwrap();
     let boundary: Path = g[0].outer.clone().into();
@@ -152,8 +149,7 @@ fn nearest_round_join_exceeds_tolerance() {
 /// `(r-t)/(r+t)`, which round to exactly 1.0 once `t/r` is below ~1.1e-16, so `acos`
 /// gives a zero step and `segment_count` (src/arc.rs:396) sees an infinite count.
 #[test]
-#[ignore = "bug: nearly flat 3-point arc (huge radius) errors instead of becoming a chord"]
-fn nearly_flat_arc_spurious_error() {
+fn nearly_flat_arc_is_accepted() {
     let l = 500_000_000i64;
     let shape = Shape::new(
         vec![
@@ -179,8 +175,7 @@ fn nearly_flat_arc_spurious_error() {
 /// sign with the signed area) accepts it and the convex shortcut (src/hull.rs:97-105)
 /// returns the hull of the pairwise vertex sums: doubled area 49098 instead of 24256.
 #[test]
-#[ignore = "bug: minkowski_sum treats a self-intersecting star ring as convex"]
-fn minkowski_sum_pentagram_is_not_convex() {
+fn minkowski_sum_pentagram_not_treated_as_convex() {
     let star = Polygon::from(Ring::from([
         (0, 100),
         (-59, -81),
@@ -210,8 +205,7 @@ fn minkowski_sum_pentagram_is_not_convex() {
 /// segments*, not the cells allocated. The cell size should also be at least
 /// `max(w, h) / (n + 16)` (or the grid rejected when `nx * ny` greatly exceeds `n`).
 #[test]
-#[ignore = "bug: snap_round allocates O(sqrt(width * n / height)) grid cells for thin inputs"]
-fn thin_far_apart_input_allocates_huge_grid() {
+fn thin_far_apart_input_bounded_memory() {
     let m = MAX_COORD;
     let a = vec![
         Ring::from([(-m, 0), (-m + 10, 0), (-m + 10, 1)]),
@@ -241,8 +235,8 @@ fn thin_far_apart_input_allocates_huge_grid() {
 /// all O(n^2) bounding-box-overlapping pairs. Radial patterns hit the same limit: a fan of
 /// 8000 / 32000 pie slices with a common apex takes 1.2 s / 19 s to union in release.
 #[test]
-#[ignore = "bug: noding is quadratic for long parallel segments not aligned to x/y/diagonals"]
-fn skewed_parallel_bus_is_quadratic() {
+#[cfg_attr(debug_assertions, ignore = "timing assertion: release builds only")]
+fn skewed_parallel_bus_is_fast() {
     let n = 4000i64;
     let bus = |dy: i64| -> Vec<Ring> {
         (0..n)
@@ -286,8 +280,8 @@ fn skewed_parallel_bus_is_quadratic() {
 /// trapezoids) cost O(n^3), although the output has only n trapezoids. Release: 800
 /// stripes 33 ms, 1600 0.23 s, 3200 1.6 s (x7 per doubling); debug, 3000 stripes: 14.8 s.
 #[test]
-#[ignore = "bug: trapezoids is cubic in the number of stacked parallel stripes"]
-fn trapezoids_parallel_stripes_cubic() {
+#[cfg_attr(debug_assertions, ignore = "timing assertion: release builds only")]
+fn trapezoids_parallel_stripes_fast() {
     let n = 3000i64;
     let rings: Vec<Ring> = (0..n)
         .map(|i| {
@@ -311,8 +305,8 @@ fn trapezoids_parallel_stripes_cubic() {
 /// layers of parallel tracks" DRC query) test all O(n^2) pairs. Release, each call: 2000
 /// stripes per side 0.11 s, 8000 1.7 s, 32000 27 s; debug, 8000: 31.8 s.
 #[test]
-#[ignore = "bug: intersects/distance_less_than are quadratic on parallel horizontal stripes"]
-fn intersects_parallel_stripes_quadratic() {
+#[cfg_attr(debug_assertions, ignore = "timing assertion: release builds only")]
+fn intersects_parallel_stripes_fast() {
     let n = 8000i64;
     let stripe = |y: i64| Polygon::from(rect(0, y, 1_000_000, 5));
     let a: Vec<Polygon> = (0..n).map(|i| stripe(20 * i)).collect();
@@ -330,8 +324,8 @@ fn intersects_parallel_stripes_quadratic() {
 /// vertices 14 ms, 20000 0.21 s, 80000 3.3 s, while `distance_less_than` on the same input
 /// takes 1.3 ms; debug, 80000: 47 s.
 #[test]
-#[ignore = "bug: distance is quadratic for vertically separated long paths"]
-fn distance_parallel_paths_quadratic() {
+#[cfg_attr(debug_assertions, ignore = "timing assertion: release builds only")]
+fn distance_parallel_paths_fast() {
     let n = 80_000i64;
     let a: Path = (0..n).map(|i| p(i * 100, (i % 2) * 50)).collect();
     let b: Path = (0..n).map(|i| p(i * 100, 10_000 + (i % 2) * 50)).collect();

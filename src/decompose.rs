@@ -3,7 +3,7 @@
 use crate::boolean::{FillRule, RingSource, union_all};
 use crate::error::Result;
 use crate::geom::{Point, PointF};
-use core::cmp::Ordering;
+use crate::sweep::{cmp_sweep_edges, sweep_events};
 
 /// A trapezoid of a vertical decomposition: the region with `x0 <= x <= x1` between the
 /// lines supporting the `bottom` and `top` edges. Both edges span `[x0, x1]` and are given
@@ -57,24 +57,6 @@ impl Trapezoid {
     }
 }
 
-/// Compares edges `a` and `b` (left to right, non-vertical, non-crossing, both spanning the
-/// slab `[xl, xr]`) by height at the slab's middle, exactly.
-fn cmp_in_slab(a: (Point, Point), b: (Point, Point), xl: i64, xr: i64) -> Ordering {
-    // y(x) = a0.y + (x - a0.x) * dy / dx at x = (xl + xr) / 2; compare doubled values:
-    // (2 a0.y dx + (xl + xr - 2 a0.x) dy) / dx.
-    let num = |e: (Point, Point)| -> (i128, i128) {
-        let dx = (e.1.x - e.0.x) as i128;
-        let dy = (e.1.y - e.0.y) as i128;
-        (
-            2 * e.0.y as i128 * dx + (xl as i128 + xr as i128 - 2 * e.0.x as i128) * dy,
-            dx,
-        )
-    };
-    let (na, da) = num(a);
-    let (nb, db) = num(b);
-    (na * db).cmp(&(nb * da))
-}
-
 /// Vertical decomposition of the region of `input` (non-zero fill rule) into trapezoids.
 ///
 /// The region is first normalized with a union. Vertical walls are extended from every
@@ -94,72 +76,65 @@ fn cmp_in_slab(a: (Point, Point), b: (Point, Point), xl: i64, xr: i64) -> Orderi
 /// ```
 pub fn trapezoids(input: &(impl RingSource + ?Sized)) -> Result<Vec<Trapezoid>> {
     let polys = union_all(input, FillRule::NonZero)?;
-    // Non-vertical edges, left to right.
-    let mut edges: Vec<(Point, Point)> = Vec::new();
+    // Boundary edges (canonical rings: interior on the left), as (lo, hi) with the
+    // interior above when the ring runs from lo to hi.
+    let mut edges: Vec<(Point, Point, bool)> = Vec::new();
     for p in &polys {
         for r in p.rings() {
             for (a, b) in r.edges() {
-                if a.x != b.x {
-                    edges.push(if a.x < b.x { (a, b) } else { (b, a) });
-                }
+                edges.push(if a < b { (a, b, true) } else { (b, a, false) });
             }
         }
     }
-    let mut xs: Vec<i64> = edges.iter().flat_map(|e| [e.0.x, e.1.x]).collect();
-    xs.sort_unstable();
-    xs.dedup();
-    edges.sort_unstable_by_key(|e| (e.0.x, e.0.y, e.1.x, e.1.y));
+    edges.sort_unstable_by(|a, b| cmp_sweep_edges((a.0, a.1), (b.0, b.1)));
+    let segs: Vec<(Point, Point)> = edges.iter().map(|e| (e.0, e.1)).collect();
+    // For every edge with the interior above it: the trapezoid open in that gap
+    // (start x, top edge).
+    let mut open: Vec<Option<(i64, u32)>> = vec![None; edges.len()];
     let mut out: Vec<Trapezoid> = Vec::new();
-    // Open trapezoids: (bottom edge index, top edge index, start x).
-    let mut open: Vec<(u32, u32, i64)> = Vec::new();
-    let mut status: Vec<u32> = Vec::new();
-    let mut next_edge = 0usize;
-    for w in xs.windows(2) {
-        let (xl, xr) = (w[0], w[1]);
-        // Active edges for slab [xl, xr]: drop those ending at or before xl, add new ones.
-        status.retain(|&e| edges[e as usize].1.x > xl);
-        while next_edge < edges.len() && edges[next_edge].0.x <= xl {
-            if edges[next_edge].1.x > xl {
-                status.push(next_edge as u32);
+    let emit = |bottom: u32, x0: i64, top: u32, x1: i64, out: &mut Vec<Trapezoid>| {
+        // Zero-width pieces (between walls at the same x, or along vertical edges) vanish.
+        if x1 > x0 {
+            let (b, t) = (&edges[bottom as usize], &edges[top as usize]);
+            out.push(Trapezoid {
+                x0,
+                x1,
+                bottom: (b.0, b.1),
+                top: (t.0, t.1),
+            });
+        }
+    };
+    sweep_events(&segs, |below, above, ending, starting| {
+        let v = if starting.is_empty() {
+            segs[ending[0] as usize].1
+        } else {
+            segs[starting.start as usize].0
+        };
+        let x = v.x;
+        // A wall through `v` closes the trapezoid of every gap touching the vertex.
+        if let Some(b) = below
+            && let Some((x0, t)) = open[b as usize].take()
+        {
+            emit(b, x0, t, x, &mut out);
+        }
+        for &e in ending {
+            if let Some((x0, t)) = open[e as usize].take() {
+                emit(e, x0, t, x, &mut out);
             }
-            next_edge += 1;
         }
-        status.sort_by(|&a, &b| {
-            cmp_in_slab(edges[a as usize], edges[b as usize], xl, xr).then(a.cmp(&b))
-        });
-        // Interior gaps are between status[2k] and status[2k + 1].
-        let mut new_open: Vec<(u32, u32, i64)> = Vec::with_capacity(status.len() / 2);
-        let mut k = 0;
-        while k + 1 < status.len() {
-            let (b, t) = (status[k], status[k + 1]);
-            // Continue an open trapezoid with the same bounding edges, else start one.
-            let start = match open.iter().position(|&(ob, ot, _)| ob == b && ot == t) {
-                Some(i) => open.swap_remove(i).2,
-                None => xl,
-            };
-            new_open.push((b, t, start));
-            k += 2;
+        // New gaps, bottom to top: below's gap up to the first new edge (or `above`), the
+        // gaps between new edges, and the gap above the last new edge.
+        let mut bottoms: Vec<u32> = below.into_iter().collect();
+        bottoms.extend(starting.clone());
+        for (k, &bot) in bottoms.iter().enumerate() {
+            let top = bottoms.get(k + 1).copied().or(above);
+            if let Some(top) = top
+                && edges[bot as usize].2
+            {
+                open[bot as usize] = Some((x, top));
+            }
         }
-        for (b, t, start) in open.drain(..) {
-            out.push(Trapezoid {
-                x0: start,
-                x1: xl,
-                bottom: edges[b as usize],
-                top: edges[t as usize],
-            });
-        }
-        open = new_open;
-    }
-    if let Some(&xlast) = xs.last() {
-        for (b, t, start) in open.drain(..) {
-            out.push(Trapezoid {
-                x0: start,
-                x1: xlast,
-                bottom: edges[b as usize],
-                top: edges[t as usize],
-            });
-        }
-    }
+    });
     out.sort_unstable_by_key(|t| (t.x0, t.bottom, t.top, t.x1));
     Ok(out)
 }
