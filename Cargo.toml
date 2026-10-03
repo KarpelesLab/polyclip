@@ -1,7 +1,9 @@
 # The cargo-fuzz crate under `fuzz/` (nightly + libFuzzer) is built separately
-# with `cargo +nightly fuzz run <target>`; keep it out of the implicit workspace.
+# with `cargo +nightly fuzz run <target>`, and `oracle/` (differential tests against
+# Clipper2, which needs a C++ compiler) is its own crate too; keep both out of the
+# implicit workspace.
 [workspace]
-exclude = ["fuzz"]
+exclude = ["fuzz", "oracle"]
 
 [package]
 name = "polyclip"
@@ -13,7 +15,7 @@ repository = "https://github.com/KarpelesLab/polyclip"
 license = "MIT"
 keywords = ["polygon", "clipping", "geometry", "offset", "boolean"]
 categories = ["algorithms", "graphics", "mathematics"]
-exclude = [".github", "fuzz", "testdata"]
+exclude = [".github", "fuzz", "oracle", "testdata"]
 
 [package.metadata.docs.rs]
 all-features = true

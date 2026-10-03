@@ -1,0 +1,28 @@
+# Differential testing of polyclip against Clipper2 (the C++ original, vendored
+# and compiled by `clipper2c-sys`). Clipper2 is used as an **oracle only**: it is
+# never a dependency of the polyclip library itself. This crate is excluded from
+# the root workspace (it needs a C++ compiler) and has its own CI workflow
+# (`.github/workflows/oracle.yml`).
+#
+#   cd oracle && cargo test --release               # differential tests
+#   cd oracle && cargo run --release --example timing   # speed comparison
+
+[package]
+name = "polyclip-oracle"
+version = "0.0.0"
+publish = false
+edition = "2024"
+rust-version = "1.89"
+description = "Differential tests and timing comparison of polyclip against Clipper2."
+license = "MIT"
+
+# Standalone workspace root (see fuzz/Cargo.toml for why the empty table).
+[workspace]
+
+[dependencies]
+polyclip = { path = ".." }
+# Clipper2 2.0.1 (Boost Software License) via its C API; builds the C++ sources with `cc`.
+clipper2c-sys = "0.2"
+
+[profile.release]
+debug = "line-tables-only"
