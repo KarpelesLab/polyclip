@@ -125,6 +125,7 @@ pub mod predicates;
 mod query;
 mod simplify;
 mod sweep;
+mod triangulate;
 mod validate;
 mod wide;
 
@@ -148,4 +149,5 @@ pub use query::{
     locate_in_ring, ring_area2, ring_winding,
 };
 pub use simplify::{simplify_path, simplify_polygon, simplify_polygons};
+pub use triangulate::{Triangulation, triangulate, triangulate_delaunay, triangulate_set};
 pub use validate::{RingId, ValidityError, check_canonical, validate, validate_set};
