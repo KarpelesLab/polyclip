@@ -32,7 +32,8 @@ pub use fracture::{fracture, fracture_set};
 pub use geom::*;
 pub use hull::{convex_hull, convex_hull_of, minkowski_sum};
 pub use offset::{
-    EndCap, Join, closing, offset, offset_paths, offset_paths_tree, offset_tree, opening,
+    EndCap, Join, closing, offset, offset_paths, offset_paths_tagged, offset_paths_tree,
+    offset_shape, offset_shape_tagged, offset_tagged, offset_tree, opening,
 };
 pub use query::{
     Geometry, Location, Segment, area2, centroid, contains, intersects, locate, locate_in_polygon,

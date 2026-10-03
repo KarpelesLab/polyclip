@@ -14,10 +14,11 @@
 //!
 //! [`Positive`]: crate::FillRule::Positive
 
+use crate::arc::Shape;
 use crate::arc::{ArcTol, Circle, arc_points, round_pt};
 use crate::boolean::{Boolean, FillRule, PathSource, RingSource};
 use crate::error::{Error, Result};
-use crate::geom::{Point, PolyTree, PolygonSet, Ring};
+use crate::geom::{Point, PolyTree, PolygonSet, Ring, TaggedRing};
 
 /// How offset edges are connected at convex corners.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -127,7 +128,7 @@ fn emit_vertex(
     vj: VJoin,
     tol: ArcTol,
     out: &mut Vec<Point>,
-) -> Result<()> {
+) -> Result<VKind> {
     let d1 = V2::unit(prev, cur);
     let d2 = V2::unit(cur, next);
     let n1 = d1.right();
@@ -146,7 +147,7 @@ fn emit_vertex(
     if cr == 0 && !reversal {
         // Straight on.
         push(out, at(cur, u1)?);
-        return Ok(());
+        return Ok(VKind::Straight);
     }
     let convex = if reversal {
         delta > 0.0
@@ -158,7 +159,7 @@ fn emit_vertex(
         push(out, at(cur, u1)?);
         push(out, cur);
         push(out, at(cur, u2)?);
-        return Ok(());
+        return Ok(VKind::Through);
     }
     let ad = delta.abs();
     let clip = |l: f64, out: &mut Vec<Point>| -> Result<()> {
@@ -228,50 +229,110 @@ fn emit_vertex(
             arc_points(cx, cy, ad, a0, sweep, end, delta > 0.0, tol, out)?;
         }
     }
-    Ok(())
+    Ok(VKind::Join)
 }
 
-/// Raw offset curve of a closed ring (interior on the left), appended as a new ring.
-fn raw_ring(
+/// How the points emitted at a vertex connect: straight on, through the vertex, or a join.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VKind {
+    Straight,
+    Through,
+    Join,
+}
+
+/// Appends `p` whose outgoing edge has tag `t`, merging repeated points (the later
+/// outgoing tag wins).
+#[inline]
+fn push_t(pts: &mut Vec<Point>, tags: &mut Vec<u64>, p: Point, t: u64) {
+    if pts.last() == Some(&p) {
+        *tags.last_mut().unwrap() = t;
+    } else {
+        pts.push(p);
+        tags.push(t);
+    }
+}
+
+/// Raw offset curve of a closed cycle `pts` (edge `i` from `pts[i]` to `pts[i + 1]` tagged
+/// `tags[i]`), with the join (or cap) at each vertex given by `vj`. Offset edges keep their
+/// source tag; join edges between equally tagged edges keep that tag (an approximated arc
+/// stays one arc), other joins get `corner_tag`.
+#[allow(clippy::too_many_arguments)]
+fn raw_cycle(
     pts: &[Point],
+    tags: &[u64],
     delta: f64,
-    join: Join,
+    vj: impl Fn(usize) -> VJoin,
     tol: ArcTol,
-    rings: &mut Vec<Ring>,
+    corner_tag: u64,
+    out: &mut Vec<TaggedRing>,
 ) -> Result<()> {
     let n = pts.len();
     if n < 2 {
         return Ok(());
     }
-    let mut out = Vec::with_capacity(n * 2);
+    let mut rp: Vec<Point> = Vec::with_capacity(n * 2);
+    let mut rt: Vec<u64> = Vec::with_capacity(n * 2);
+    let mut vbuf: Vec<Point> = Vec::new();
     for i in 0..n {
         let prev = pts[(i + n - 1) % n];
         let next = pts[(i + 1) % n];
-        emit_vertex(prev, pts[i], next, delta, VJoin::Join(join), tol, &mut out)?;
+        let (tin, tout) = (tags[(i + n - 1) % n], tags[i]);
+        vbuf.clear();
+        let kind = emit_vertex(prev, pts[i], next, delta, vj(i), tol, &mut vbuf)?;
+        let k = vbuf.len();
+        for (j, &p) in vbuf.iter().enumerate() {
+            let t = if j + 1 == k {
+                tout
+            } else {
+                match kind {
+                    VKind::Through => {
+                        if j == 0 {
+                            tin
+                        } else {
+                            tout
+                        }
+                    }
+                    _ if tin == tout => tin,
+                    _ => corner_tag,
+                }
+            };
+            push_t(&mut rp, &mut rt, p, t);
+        }
     }
-    while out.len() > 1 && out.first() == out.last() {
-        out.pop();
+    while rp.len() > 1 && rp.first() == rp.last() {
+        rp.pop();
+        rt.pop();
     }
-    if out.len() >= 3 {
-        rings.push(Ring(out));
+    if rp.len() >= 3 {
+        out.push(TaggedRing {
+            points: rp,
+            tags: rt,
+        });
     }
     Ok(())
 }
 
-/// Removes consecutive duplicates (and a closing duplicate when `closed`).
-fn dedup(pts: &[Point], closed: bool) -> Vec<Point> {
+/// Removes consecutive duplicates (and a closing duplicate when `closed`), keeping for each
+/// kept point the tag of its outgoing edge.
+fn dedup_tagged(pts: &[Point], tags: &[u64], closed: bool) -> (Vec<Point>, Vec<u64>) {
     let mut v: Vec<Point> = Vec::with_capacity(pts.len());
-    for &p in pts {
-        if v.last() != Some(&p) {
+    let mut t: Vec<u64> = Vec::with_capacity(pts.len());
+    for (i, &p) in pts.iter().enumerate() {
+        let tag = tags.get(i).copied().unwrap_or(0);
+        if v.last() == Some(&p) {
+            *t.last_mut().unwrap() = tag;
+        } else {
             v.push(p);
+            t.push(tag);
         }
     }
     if closed {
         while v.len() > 1 && v.first() == v.last() {
             v.pop();
+            t.pop();
         }
     }
-    v
+    (v, t)
 }
 
 fn check_delta(delta: i64) -> Result<()> {
@@ -281,15 +342,43 @@ fn check_delta(delta: i64) -> Result<()> {
     Ok(())
 }
 
-/// Builds the raw offset rings of a normalized polygon set.
-fn raw_polygons(polys: &PolygonSet, delta: i64, join: Join, tol: ArcTol) -> Result<Vec<Ring>> {
-    let mut rings = Vec::new();
-    for p in polys {
-        for r in p.rings() {
-            raw_ring(&r.0, delta as f64, join, tol, &mut rings)?;
-        }
+/// Offsets a region by `delta`, propagating edge tags, and returns the nesting tree.
+///
+/// Like [`offset_tree`], but every output edge carries the tag of the input edge it was
+/// offset from. Join edges between two edges with the same tag (for example consecutive
+/// segments of an approximated arc, see [`Shape::to_tagged`](crate::Shape::to_tagged)) keep
+/// that tag, so an offset arc is still recognizable as one arc; joins at corners between
+/// differently tagged edges are tagged `corner_tag`. Intersections created by the final
+/// union keep the tags of the edges they lie on.
+pub fn offset_tagged(
+    input: &(impl RingSource + ?Sized),
+    delta: i64,
+    join: Join,
+    tol: ArcTol,
+    corner_tag: u64,
+) -> Result<PolyTree> {
+    check_delta(delta)?;
+    let norm = Boolean::new()
+        .subject(input, FillRule::NonZero)
+        .execute_tree()?;
+    if delta == 0 {
+        return Ok(norm);
     }
-    Ok(rings)
+    let mut rings: Vec<TaggedRing> = Vec::new();
+    for n in &norm.nodes {
+        raw_cycle(
+            &n.ring,
+            &n.tags,
+            delta as f64,
+            |_| VJoin::Join(join),
+            tol,
+            corner_tag,
+            &mut rings,
+        )?;
+    }
+    Boolean::new()
+        .subject(&rings, FillRule::Positive)
+        .execute_tree()
 }
 
 /// Offsets a region by `delta` (positive grows, negative shrinks), returning the full
@@ -305,17 +394,7 @@ pub fn offset_tree(
     join: Join,
     tol: ArcTol,
 ) -> Result<PolyTree> {
-    check_delta(delta)?;
-    let norm = Boolean::new().subject(input, FillRule::NonZero).execute()?;
-    if delta == 0 {
-        return Boolean::new()
-            .subject(&norm, FillRule::NonZero)
-            .execute_tree();
-    }
-    let rings = raw_polygons(&norm, delta, join, tol)?;
-    Boolean::new()
-        .subject(&rings, FillRule::Positive)
-        .execute_tree()
+    offset_tagged(input, delta, join, tol, 0)
 }
 
 /// Offsets a region by `delta` (positive grows, negative shrinks). See [`offset_tree`].
@@ -337,6 +416,39 @@ pub fn offset(
     Ok(offset_tree(input, delta, join, tol)?.to_polygon_set())
 }
 
+/// Offsets a curved [`Shape`] by `delta`.
+///
+/// The shape is approximated with half the tolerance and the result offset with the other
+/// half, both on `tol.side`, so the total deviation from the true offset shape stays within
+/// `tol.tolerance` on the requested side (up to integer rounding). Typical use: pad shapes
+/// inflated by a clearance with `Side::Outside`, so the obstacle never under-estimates.
+///
+/// ```
+/// use polyclip::{offset_shape, ArcTol, Circle, Curve, Join, Point, Shape, Side};
+/// let pad = Shape::new(vec![Curve::CenterArc { center: Point::new(0, 0), end: Point::new(500, 0), ccw: true }]
+///     .into_iter().chain([Curve::Line(Point::new(500, 0))]).collect(), vec![]);
+/// let obstacle = offset_shape(&pad, 200, Join::Round, ArcTol::new(10, Side::Outside)).unwrap();
+/// assert_eq!(obstacle.len(), 1);
+/// ```
+pub fn offset_shape(shape: &Shape, delta: i64, join: Join, tol: ArcTol) -> Result<PolygonSet> {
+    Ok(offset_shape_tagged(shape, delta, join, tol, &|_, _| 0, 0)?.to_polygon_set())
+}
+
+/// Like [`offset_shape`], with edge tags: edges coming from element `j` of contour `i` (0 =
+/// outer, `1 + k` = hole `k`) are tagged `tag(i, j)`, corner joins `corner_tag`.
+pub fn offset_shape_tagged(
+    shape: &Shape,
+    delta: i64,
+    join: Join,
+    tol: ArcTol,
+    tag: &dyn Fn(usize, usize) -> u64,
+    corner_tag: u64,
+) -> Result<PolyTree> {
+    let half = ArcTol::new((tol.tolerance / 2).max(1), tol.side);
+    let rings = shape.to_tagged(half, tag)?;
+    offset_tagged(&rings, delta, join, half, corner_tag)
+}
+
 /// Morphological opening: shrink by `d`, then grow by `d`, with round joins. Removes every
 /// part narrower than `2 * d` (minimum-width enforcement for copper zones) while leaving
 /// wide parts essentially unchanged (convex corners get rounded with radius `d`).
@@ -352,6 +464,55 @@ pub fn closing(input: &(impl RingSource + ?Sized), d: i64, tol: ArcTol) -> Resul
     offset(&grown, -d.abs(), Join::Round, tol)
 }
 
+/// Offsets open paths with edge tags (see [`offset_tagged`] for the tagging rules; end caps
+/// are tagged `corner_tag`). Returns the nesting tree.
+pub fn offset_paths_tagged(
+    paths: &(impl PathSource + ?Sized),
+    delta: i64,
+    join: Join,
+    cap: EndCap,
+    tol: ArcTol,
+    corner_tag: u64,
+) -> Result<PolyTree> {
+    if delta < 0 {
+        return Err(Error::InvalidParameter("path offset must be non-negative"));
+    }
+    check_delta(delta)?;
+    let mut rings: Vec<TaggedRing> = Vec::new();
+    let mut err: Option<Error> = None;
+    paths.visit_paths(&mut |pts, tags| {
+        if err.is_some() {
+            return;
+        }
+        if let Some(&p) = pts.iter().find(|p| !p.in_range()) {
+            err = Some(Error::CoordinateOutOfRange(p));
+            return;
+        }
+        if delta == 0 {
+            return;
+        }
+        let tags = tags.unwrap_or(&[]);
+        if let Err(e) = raw_path(
+            pts,
+            tags,
+            delta as f64,
+            join,
+            cap,
+            tol,
+            corner_tag,
+            &mut rings,
+        ) {
+            err = Some(e);
+        }
+    });
+    if let Some(e) = err {
+        return Err(e);
+    }
+    Boolean::new()
+        .subject(&rings, FillRule::Positive)
+        .execute_tree()
+}
+
 /// Offsets open paths by `delta >= 0` on both sides (strokes them with width `2 * delta`),
 /// with `join` at interior vertices and `cap` at both ends. Returns the nesting tree.
 ///
@@ -364,33 +525,7 @@ pub fn offset_paths_tree(
     cap: EndCap,
     tol: ArcTol,
 ) -> Result<PolyTree> {
-    if delta < 0 {
-        return Err(Error::InvalidParameter("path offset must be non-negative"));
-    }
-    check_delta(delta)?;
-    let mut rings: Vec<Ring> = Vec::new();
-    let mut err: Option<Error> = None;
-    paths.visit_paths(&mut |pts, _| {
-        if err.is_some() {
-            return;
-        }
-        if let Some(&p) = pts.iter().find(|p| !p.in_range()) {
-            err = Some(Error::CoordinateOutOfRange(p));
-            return;
-        }
-        if delta == 0 {
-            return;
-        }
-        if let Err(e) = raw_path(pts, delta as f64, join, cap, tol, &mut rings) {
-            err = Some(e);
-        }
-    });
-    if let Some(e) = err {
-        return Err(e);
-    }
-    Boolean::new()
-        .subject(&rings, FillRule::Positive)
-        .execute_tree()
+    offset_paths_tagged(paths, delta, join, cap, tol, 0)
 }
 
 /// Offsets open paths. See [`offset_paths_tree`].
@@ -411,45 +546,59 @@ pub fn offset_paths(
     Ok(offset_paths_tree(paths, delta, join, cap, tol)?.to_polygon_set())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn raw_path(
     pts: &[Point],
+    tags: &[u64],
     delta: f64,
     join: Join,
     cap: EndCap,
     tol: ArcTol,
-    rings: &mut Vec<Ring>,
+    corner_tag: u64,
+    rings: &mut Vec<TaggedRing>,
 ) -> Result<()> {
     let closed = cap == EndCap::Joined;
-    let v = dedup(pts, closed);
+    // For a closed path the closing edge carries the last tag.
+    let (v, t) = dedup_tagged(pts, tags, closed);
     match v.len() {
         0 => return Ok(()),
         1 => {
             let p = v[0];
             let d = delta as i64;
-            match cap {
-                EndCap::Round | EndCap::Joined => rings.push(Circle::new(p, d).to_ring(tol)?),
+            let ring = match cap {
+                EndCap::Round | EndCap::Joined => Circle::new(p, d).to_ring(tol)?,
                 EndCap::Square => {
                     for q in [Point::new(p.x - d, p.y - d), Point::new(p.x + d, p.y + d)] {
                         crate::error::check_point(q)?;
                     }
-                    rings.push(Ring::from([
+                    Ring::from([
                         (p.x - d, p.y - d),
                         (p.x + d, p.y - d),
                         (p.x + d, p.y + d),
                         (p.x - d, p.y + d),
-                    ]))
+                    ])
                 }
-                EndCap::Butt => {}
-            }
+                EndCap::Butt => return Ok(()),
+            };
+            rings.push(TaggedRing::uniform(ring, corner_tag));
             return Ok(());
         }
         _ => {}
     }
     if closed && v.len() >= 3 {
         // Both sides of the loop: the ring and its reverse, each offset outward.
-        raw_ring(&v, delta, join, tol, rings)?;
-        let rev: Vec<Point> = v.iter().rev().copied().collect();
-        raw_ring(&rev, delta, join, tol, rings)?;
+        raw_cycle(&v, &t, delta, |_| VJoin::Join(join), tol, corner_tag, rings)?;
+        let mut rev = TaggedRing { points: v, tags: t };
+        crate::arc::reverse_tagged(&mut rev);
+        raw_cycle(
+            &rev.points,
+            &rev.tags,
+            delta,
+            |_| VJoin::Join(join),
+            tol,
+            corner_tag,
+            rings,
+        )?;
         return Ok(());
     }
     // Walk forward then back: p0 .. pn .. p1, with caps at the two turnarounds.
@@ -458,25 +607,26 @@ fn raw_path(
     ring.extend_from_slice(&v);
     ring.extend(v[1..n - 1].iter().rev());
     let m = ring.len();
-    let mut out = Vec::with_capacity(m * 2);
+    // Edge i < n - 1 is path edge i; edge i >= n - 1 is path edge 2n - 3 - i reversed.
+    let rtags: Vec<u64> = (0..m)
+        .map(|i| if i < n - 1 { t[i] } else { t[2 * n - 3 - i] })
+        .collect();
     let cap = if closed { EndCap::Round } else { cap };
-    for i in 0..m {
-        let prev = ring[(i + m - 1) % m];
-        let next = ring[(i + 1) % m];
-        let vj = if i == 0 || i == n - 1 {
-            VJoin::Cap(cap)
-        } else {
-            VJoin::Join(join)
-        };
-        emit_vertex(prev, ring[i], next, delta, vj, tol, &mut out)?;
-    }
-    while out.len() > 1 && out.first() == out.last() {
-        out.pop();
-    }
-    if out.len() >= 3 {
-        rings.push(Ring(out));
-    }
-    Ok(())
+    raw_cycle(
+        &ring,
+        &rtags,
+        delta,
+        |i| {
+            if i == 0 || i == n - 1 {
+                VJoin::Cap(cap)
+            } else {
+                VJoin::Join(join)
+            }
+        },
+        tol,
+        corner_tag,
+        rings,
+    )
 }
 
 #[cfg(test)]
@@ -617,5 +767,69 @@ mod tests {
         let s = offset(&l, -10, Join::Round, TOL).unwrap();
         assert!(s[0].outer.contains(&Point::new(10, 10)));
         assert_eq!(check_canonical(&s, true), Ok(()));
+    }
+}
+
+#[cfg(test)]
+mod tag_tests {
+    use super::*;
+    use crate::arc::{Curve, Side};
+
+    #[test]
+    fn tags_through_offset() {
+        let p = Point::new;
+        // Stadium: line, arc, line, arc.
+        let s = Shape::new(
+            vec![
+                Curve::Line(p(50_000, -10_000)),
+                Curve::Arc {
+                    mid: p(60_000, 0),
+                    end: p(50_000, 10_000),
+                },
+                Curve::Line(p(0, 10_000)),
+                Curve::Arc {
+                    mid: p(-10_000, 0),
+                    end: p(0, -10_000),
+                },
+            ],
+            vec![],
+        );
+        let t = offset_shape_tagged(
+            &s,
+            2_000,
+            Join::Round,
+            ArcTol::new(20, Side::Outside),
+            &|_, j| 100 + j as u64,
+            999,
+        )
+        .unwrap();
+        assert_eq!(t.nodes.len(), 1);
+        let n = &t.nodes[0];
+        assert_eq!(n.tags.len(), n.ring.len());
+        // Every source element survives as a tag; arcs dominate the vertex count.
+        for tag in [100, 101, 102, 103] {
+            assert!(n.tags.contains(&tag), "missing {tag}: {:?}", n.tags);
+        }
+        // Edges tagged with an arc lie (approximately) on the offset circle of radius 12000.
+        let centre = |tag| {
+            if tag == 101 {
+                (50_000.0, 0.0)
+            } else {
+                (0.0, 0.0)
+            }
+        };
+        for (i, &tag) in n.tags.iter().enumerate() {
+            if tag == 101 || tag == 103 {
+                let q = n.ring[i];
+                let (cx, cy) = centre(tag);
+                let r = ((q.x as f64 - cx).powi(2) + (q.y as f64 - cy).powi(2)).sqrt();
+                assert!((r - 12_000.0).abs() < 30.0, "tag {tag} vertex {q:?} r {r}");
+            }
+        }
+        // Same region as the untagged version (which also merges collinear edges whose tags
+        // differ, so the vertex lists may differ).
+        let untagged =
+            offset_shape(&s, 2_000, Join::Round, ArcTol::new(20, Side::Outside)).unwrap();
+        assert_eq!(untagged[0].outer.signed_area2(), n.ring.signed_area2());
     }
 }
