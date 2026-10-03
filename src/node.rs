@@ -12,12 +12,13 @@
 //! * [`node_exact`] — no rounding at all: fails if any two segments cross properly, otherwise
 //!   splits segments at vertices lying on their interiors.
 //!
-//! Both use a k-d partition of the plane into leaves holding few segments each.
+//! Both use a uniform grid whose cell size follows the typical segment length; a segment is
+//! listed in every cell it passes within distance 1 of, so any two segments meeting near a
+//! point are both listed in that point's cell.
 
 use crate::geom::{Point, Rect};
 use crate::predicates::{
-    Frac, in_segment_interior, orient, rounded_crossing, segment_meets_rect, segment_pixel_entry,
-    segments_cross_properly,
+    dot, floor_div, in_segment_interior, orient, segment_pixel_entry, segments_cross_properly, sub,
 };
 
 /// A fragment of input segment `src`, from `a` to `b` (same direction as the source).
@@ -28,34 +29,15 @@ pub(crate) struct Frag {
     pub src: u32,
 }
 
-const LEAF_SIZE: usize = 16;
-const MAX_DEPTH: u32 = 48;
-
-#[derive(Clone, Copy, Debug)]
-enum KdNode {
-    Split {
-        axis: u8,
-        at: i64,
-        left: u32,
-        right: u32,
-    },
-    Leaf {
-        leaf: u32,
-    },
-}
-
-/// A leaf: a half-open integer region `[lo, hi)` and its segments.
-#[derive(Clone, Debug)]
-struct Leaf {
-    lo: Point,
-    hi: Point,
-    start: u32,
-    end: u32,
-}
-
-struct Kd {
-    nodes: Vec<KdNode>,
-    leaves: Vec<Leaf>,
+/// Uniform grid of half-open square cells `[x0 + i*s, x0 + (i+1)*s) x [...]`.
+struct Grid {
+    x0: i64,
+    y0: i64,
+    s: i64,
+    nx: usize,
+    ny: usize,
+    /// `items[start[c]..start[c + 1]]` are the segments of cell `c`.
+    start: Vec<u32>,
     items: Vec<u32>,
 }
 
@@ -64,166 +46,148 @@ fn seg_bbox(s: &(Point, Point)) -> Rect {
     Rect::new(s.0, s.1)
 }
 
-impl Kd {
-    /// Builds the partition. A segment belongs to every leaf whose region, grown by one unit,
-    /// it meets; this guarantees that a segment passing through (or within distance 1 of) an
-    /// integer point of a leaf region is listed in that leaf.
-    fn build(segs: &[(Point, Point)], bboxes: &[Rect]) -> Kd {
-        let mut kd = Kd {
-            nodes: Vec::new(),
-            leaves: Vec::new(),
+/// Counting sort of `(key, value)` pairs by key into CSR form. Stable.
+fn csr<T: Copy + Default>(n_keys: usize, pairs: &[(u32, T)]) -> (Vec<u32>, Vec<T>) {
+    let mut start = vec![0u32; n_keys + 1];
+    for &(k, _) in pairs {
+        start[k as usize + 1] += 1;
+    }
+    for i in 0..n_keys {
+        start[i + 1] += start[i];
+    }
+    let mut pos: Vec<u32> = start[..n_keys].to_vec();
+    let mut out = vec![T::default(); pairs.len()];
+    for &(k, v) in pairs {
+        let p = &mut pos[k as usize];
+        out[*p as usize] = v;
+        *p += 1;
+    }
+    (start, out)
+}
+
+impl Grid {
+    fn build(segs: &[(Point, Point)], bboxes: &[Rect]) -> Grid {
+        let Some(bb) = bboxes.iter().copied().reduce(|a, b| a.union(&b)) else {
+            return Grid {
+                x0: 0,
+                y0: 0,
+                s: 1,
+                nx: 1,
+                ny: 1,
+                start: vec![0, 0],
+                items: Vec::new(),
+            };
+        };
+        let n = segs.len();
+        let w = (bb.max.x - bb.min.x + 1) as f64;
+        let h = (bb.max.y - bb.min.y + 1) as f64;
+        // Typical segment extent (median of a deterministic sample).
+        let stride = (n / 4096).max(1);
+        let mut ext: Vec<i64> = bboxes
+            .iter()
+            .step_by(stride)
+            .map(|b| b.width().max(b.height()))
+            .collect();
+        let mid = ext.len() / 2;
+        let typical = *ext.select_nth_unstable(mid).1;
+        // At most ~4 cells per segment.
+        let s_min = libm::ceil(libm::sqrt(w * h / (4.0 * n as f64 + 16.0)));
+        let s = (typical as f64).max(s_min).max(1.0).min(w.max(h));
+        let s = s as i64;
+        let nx = ((bb.max.x - bb.min.x) / s + 1) as usize;
+        let ny = ((bb.max.y - bb.min.y) / s + 1) as usize;
+        let mut g = Grid {
+            x0: bb.min.x,
+            y0: bb.min.y,
+            s,
+            nx,
+            ny,
+            start: Vec::new(),
             items: Vec::new(),
         };
-        let Some(root_box) = bboxes.iter().copied().reduce(|a, b| a.union(&b)) else {
-            return kd;
-        };
-        let lo = root_box.min;
-        let hi = Point::new(root_box.max.x + 1, root_box.max.y + 1);
-        kd.nodes.push(KdNode::Leaf { leaf: 0 });
-        let all: Vec<u32> = (0..segs.len() as u32).collect();
-        let mut stack: Vec<(u32, Vec<u32>, Point, Point, u32)> = vec![(0, all, lo, hi, 0)];
-        let mut centers: Vec<i64> = Vec::new();
-        while let Some((node, items, lo, hi, depth)) = stack.pop() {
-            let split = if items.len() > LEAF_SIZE && depth < MAX_DEPTH {
-                Self::choose_split(&items, bboxes, lo, hi, &mut centers)
-            } else {
-                None
-            };
-            if let Some((axis, at)) = split {
-                let (lhi, rlo) = if axis == 0 {
-                    (Point::new(at, hi.y), Point::new(at, lo.y))
-                } else {
-                    (Point::new(hi.x, at), Point::new(lo.x, at))
-                };
-                let lrect = Rect {
-                    min: Point::new(lo.x - 1, lo.y - 1),
-                    max: lhi,
-                };
-                let rrect = Rect {
-                    min: Point::new(rlo.x - 1, rlo.y - 1),
-                    max: hi,
-                };
-                let mut left = Vec::new();
-                let mut right = Vec::new();
-                for &i in &items {
-                    let s = &segs[i as usize];
-                    let b = &bboxes[i as usize];
-                    if b.intersects(&lrect) && segment_meets_rect(s.0, s.1, &lrect) {
-                        left.push(i);
-                    }
-                    if b.intersects(&rrect) && segment_meets_rect(s.0, s.1, &rrect) {
-                        right.push(i);
+        let mut pairs: Vec<(u32, u32)> = Vec::with_capacity(n * 2);
+        for (i, (sg, b)) in segs.iter().zip(bboxes).enumerate() {
+            let i = i as u32;
+            let (cx0, cx1) = (g.col(b.min.x - 1), g.col(b.max.x + 1));
+            let (cy0, cy1) = (g.row(b.min.y - 1), g.row(b.max.y + 1));
+            if cx1 - cx0 <= 1 || cy1 - cy0 <= 1 {
+                for cy in cy0..=cy1 {
+                    for cx in cx0..=cx1 {
+                        pairs.push(((cy * g.nx + cx) as u32, i));
                     }
                 }
-                // Stop when splitting mostly duplicates items (long segments).
-                if (left.len() + right.len()) * 10 <= items.len() * 19 {
-                    let l = kd.nodes.len() as u32;
-                    kd.nodes.push(KdNode::Leaf { leaf: 0 });
-                    kd.nodes.push(KdNode::Leaf { leaf: 0 });
-                    kd.nodes[node as usize] = KdNode::Split {
-                        axis,
-                        at,
-                        left: l,
-                        right: l + 1,
-                    };
-                    stack.push((l + 1, right, rlo, hi, depth + 1));
-                    stack.push((l, left, lo, lhi, depth + 1));
-                    continue;
-                }
-            }
-            let leaf = kd.leaves.len() as u32;
-            let start = kd.items.len() as u32;
-            kd.items.extend_from_slice(&items);
-            kd.leaves.push(Leaf {
-                lo,
-                hi,
-                start,
-                end: kd.items.len() as u32,
-            });
-            kd.nodes[node as usize] = KdNode::Leaf { leaf };
-        }
-        kd
-    }
-
-    fn choose_split(
-        items: &[u32],
-        bboxes: &[Rect],
-        lo: Point,
-        hi: Point,
-        centers: &mut Vec<i64>,
-    ) -> Option<(u8, i64)> {
-        let w = hi.x - lo.x;
-        let h = hi.y - lo.y;
-        let axes: [u8; 2] = if w >= h { [0, 1] } else { [1, 0] };
-        for axis in axes {
-            let (l, r) = if axis == 0 {
-                (lo.x, hi.x)
-            } else {
-                (lo.y, hi.y)
-            };
-            if r - l < 2 {
                 continue;
             }
-            centers.clear();
-            centers.extend(items.iter().map(|&i| {
-                let b = &bboxes[i as usize];
-                if axis == 0 {
-                    b.min.x + (b.max.x - b.min.x) / 2
-                } else {
-                    b.min.y + (b.max.y - b.min.y) / 2
-                }
-            }));
-            let mid = centers.len() / 2;
-            let (_, m, _) = centers.select_nth_unstable(mid);
-            let mut at = *m;
-            if at <= l || at >= r {
-                at = l + (r - l) / 2;
-            }
-            return Some((axis, at.clamp(l + 1, r - 1)));
-        }
-        None
-    }
-
-    /// Index of the leaf whose region contains `p` (which must lie in the root region).
-    fn locate(&self, p: Point) -> u32 {
-        let mut n = 0usize;
-        loop {
-            match self.nodes[n] {
-                KdNode::Leaf { leaf } => return leaf,
-                KdNode::Split {
-                    axis,
-                    at,
-                    left,
-                    right,
-                } => {
-                    let c = if axis == 0 { p.x } else { p.y };
-                    n = if c < at {
-                        left as usize
-                    } else {
-                        right as usize
-                    };
+            // Long diagonal segment: per column, the rows its (grown) trace covers.
+            let (a, c) = if sg.0.x <= sg.1.x {
+                (sg.0, sg.1)
+            } else {
+                (sg.1, sg.0)
+            };
+            let slope = (c.y - a.y) as f64 / (c.x - a.x) as f64;
+            for cx in cx0..=cx1 {
+                let xa = (g.x0 + cx as i64 * s - 1).clamp(a.x, c.x);
+                let xb = (g.x0 + (cx as i64 + 1) * s).clamp(a.x, c.x);
+                let ya = a.y as f64 + (xa - a.x) as f64 * slope;
+                let yb = a.y as f64 + (xb - a.x) as f64 * slope;
+                let lo = libm::floor(ya.min(yb)) as i64 - 2;
+                let hi = libm::ceil(ya.max(yb)) as i64 + 2;
+                let (r0, r1) = (g.row(lo).max(cy0), g.row(hi).min(cy1));
+                for cy in r0..=r1 {
+                    pairs.push(((cy * g.nx + cx) as u32, i));
                 }
             }
         }
+        let (start, items) = csr(g.nx * g.ny, &pairs);
+        g.start = start;
+        g.items = items;
+        g
     }
 
-    fn leaf_items(&self, l: &Leaf) -> &[u32] {
-        &self.items[l.start as usize..l.end as usize]
+    #[inline]
+    fn col(&self, x: i64) -> usize {
+        ((x - self.x0).div_euclid(self.s)).clamp(0, self.nx as i64 - 1) as usize
+    }
+
+    #[inline]
+    fn row(&self, y: i64) -> usize {
+        ((y - self.y0).div_euclid(self.s)).clamp(0, self.ny as i64 - 1) as usize
+    }
+
+    #[inline]
+    fn cell(&self, p: Point) -> usize {
+        self.row(p.y) * self.nx + self.col(p.x)
+    }
+
+    #[inline]
+    fn n_cells(&self) -> usize {
+        self.nx * self.ny
+    }
+
+    #[inline]
+    fn items(&self, c: usize) -> &[u32] {
+        &self.items[self.start[c] as usize..self.start[c + 1] as usize]
     }
 }
 
-#[inline]
-fn in_region(l: &Leaf, p: Point) -> bool {
-    p.x >= l.lo.x && p.x < l.hi.x && p.y >= l.lo.y && p.y < l.hi.y
-}
-
-/// Calls `f(i, j)` for every pair of segments in the leaf whose bounding boxes overlap.
+/// Calls `f(i, j)` for every pair of segments in the cell whose bounding boxes overlap.
 fn for_each_pair(
     items: &[u32],
     bboxes: &[Rect],
     order: &mut Vec<u32>,
     mut f: impl FnMut(u32, u32),
 ) {
+    if items.len() <= 24 {
+        for (k, &i) in items.iter().enumerate() {
+            let bi = &bboxes[i as usize];
+            for &j in &items[k + 1..] {
+                if bi.intersects(&bboxes[j as usize]) {
+                    f(i, j);
+                }
+            }
+        }
+        return;
+    }
     order.clear();
     order.extend_from_slice(items);
     order.sort_unstable_by_key(|&i| bboxes[i as usize].min.x);
@@ -241,133 +205,164 @@ fn for_each_pair(
     }
 }
 
+/// Exact `floor(v + 1/2)` of `v = base + num * d / den` (`den > 0`).
+#[inline]
+fn round_exact(base: i64, num: i128, d: i128, den: i128) -> i64 {
+    base + floor_div(2 * num * d + den, 2 * den) as i64
+}
+
+/// The proper crossing of `a-b` and `c-d`, rounded to the nearest integer point (ties up),
+/// using floating point when it is provably correct and exact arithmetic otherwise.
+#[inline]
+fn rounded_crossing(a: Point, b: Point, c: Point, d: Point) -> Point {
+    let o3 = orient(c, d, a);
+    let o4 = orient(c, d, b);
+    let (num, den) = if o3 - o4 < 0 {
+        (-o3, o4 - o3)
+    } else {
+        (o3, o3 - o4)
+    };
+    let t = num as f64 / den as f64;
+    let dx = (b.x - a.x) as i128;
+    let dy = (b.y - a.y) as i128;
+    // Absolute error of the float evaluation is below 2^-9 for |coords| <= 2^40.
+    let round = |base: i64, dv: i128| -> i64 {
+        let v = base as f64 + dv as f64 * t + 0.5;
+        let f = libm::floor(v);
+        let frac = v - f;
+        if frac > 0.01 && frac < 0.99 {
+            f as i64
+        } else {
+            round_exact(base, num, dv, den)
+        }
+    };
+    Point::new(round(a.x, dx), round(a.y, dy))
+}
+
 /// Snap-rounds `segs` (each with distinct endpoints). Returns the fragments of every
 /// segment, grouped by segment in input order and ordered from `a` to `b` within a segment.
 pub(crate) fn snap_round(segs: &[(Point, Point)]) -> Vec<Frag> {
+    let n = segs.len();
     let bboxes: Vec<Rect> = segs.iter().map(seg_bbox).collect();
-    let kd = Kd::build(segs, &bboxes);
+    let grid = Grid::build(segs, &bboxes);
     let mut order = Vec::new();
 
-    // 1. Hot pixels: endpoints and rounded proper crossings.
-    let mut hot: Vec<Point> = Vec::with_capacity(segs.len() * 2);
+    // 1. Hot pixels: endpoints and rounded proper crossings, bucketed by cell.
+    let mut hot: Vec<(u32, Point)> = Vec::with_capacity(n * 2);
     for s in segs {
-        hot.push(s.0);
-        hot.push(s.1);
+        hot.push((grid.cell(s.0) as u32, s.0));
+        hot.push((grid.cell(s.1) as u32, s.1));
     }
-    for leaf in &kd.leaves {
-        for_each_pair(kd.leaf_items(leaf), &bboxes, &mut order, |i, j| {
+    for c in 0..grid.n_cells() {
+        let items = grid.items(c);
+        if items.len() < 2 {
+            continue;
+        }
+        for_each_pair(items, &bboxes, &mut order, |i, j| {
             let (a, b) = segs[i as usize];
-            let (c, d) = segs[j as usize];
-            if segments_cross_properly(a, b, c, d) {
-                let p = rounded_crossing(a, b, c, d);
-                // Report each crossing once: in the leaf containing its pixel.
-                if in_region(leaf, p) {
-                    hot.push(p);
+            let (p, q) = segs[j as usize];
+            if segments_cross_properly(a, b, p, q) {
+                let x = rounded_crossing(a, b, p, q);
+                // Report each crossing once: in the cell containing its pixel.
+                let xc = grid.cell(x);
+                if xc == c {
+                    hot.push((xc as u32, x));
                 }
             }
         });
     }
-    hot.sort_unstable();
-    hot.dedup();
-
-    // 2. Distribute hot pixels to leaves, sorted by (leaf, x, y).
-    let mut by_leaf: Vec<(u32, Point)> = hot.iter().map(|&p| (kd.locate(p), p)).collect();
+    let (pstart, mut pix) = csr(grid.n_cells(), &hot);
     drop(hot);
-    by_leaf.sort_unstable();
-    let mut leaf_start = vec![0u32; kd.leaves.len() + 1];
-    for &(l, _) in &by_leaf {
-        leaf_start[l as usize + 1] += 1;
+    // Sort and dedup within each cell, compacting in place.
+    let mut pstart2 = vec![0u32; grid.n_cells() + 1];
+    let mut w = 0usize;
+    for c in 0..grid.n_cells() {
+        let (s0, s1) = (pstart[c] as usize, pstart[c + 1] as usize);
+        let cell = &mut pix[s0..s1];
+        cell.sort_unstable();
+        let mut last: Option<Point> = None;
+        for k in s0..s1 {
+            let p = pix[k];
+            if last != Some(p) {
+                pix[w] = p;
+                w += 1;
+                last = Some(p);
+            }
+        }
+        pstart2[c + 1] = w as u32;
     }
-    for i in 0..kd.leaves.len() {
-        leaf_start[i + 1] += leaf_start[i];
-    }
+    pix.truncate(w);
+    let pstart = pstart2;
 
-    // 3. For each segment, the hot pixels it meets (other than its own endpoints) and the
-    //    hot pixel centres close to it.
-    struct Hit {
-        seg: u32,
-        t: Frac,
-        open: bool,
-        p: Point,
-    }
-    let mut hits: Vec<Hit> = Vec::new();
+    // 2. For each segment, the hot pixels it meets (other than its own endpoints) and the
+    //    hot pixel centres close enough to possibly lie on one of its fragments.
+    let mut hits: Vec<(u32, Point)> = Vec::new();
     let mut near: Vec<(u32, Point)> = Vec::new();
-    for (li, leaf) in kd.leaves.iter().enumerate() {
-        let pix = &by_leaf[leaf_start[li] as usize..leaf_start[li + 1] as usize];
-        if pix.is_empty() {
+    for c in 0..grid.n_cells() {
+        let cp = &pix[pstart[c] as usize..pstart[c + 1] as usize];
+        if cp.is_empty() {
             continue;
         }
-        for &si in kd.leaf_items(leaf) {
+        for &si in grid.items(c) {
             let (a, b) = segs[si as usize];
             let bb = &bboxes[si as usize];
-            let x0 = bb.min.x - 1;
-            let x1 = bb.max.x + 1;
-            let from = pix.partition_point(|&(_, p)| p.x < x0);
+            let from = cp.partition_point(|p| p.x < bb.min.x - 1);
             let len2 = {
                 let dx = (b.x - a.x) as f64;
                 let dy = (b.y - a.y) as f64;
                 dx * dx + dy * dy
             };
-            for &(_, p) in &pix[from..] {
-                if p.x > x1 {
+            for &p in &cp[from..] {
+                if p.x > bb.max.x + 1 {
                     break;
                 }
                 if p.y < bb.min.y - 1 || p.y > bb.max.y + 1 || p == a || p == b {
                     continue;
                 }
-                if let Some((t, open)) = segment_pixel_entry(a, b, p) {
-                    hits.push(Hit {
-                        seg: si,
-                        t,
-                        open,
-                        p,
-                    });
+                // Both meeting the pixel and lying on a fragment require the centre to be
+                // within sqrt(2)/2 of the segment: |orient| <= 0.71 * len (with slack).
+                let o = orient(a, b, p) as f64;
+                if o * o > 0.55 * len2 {
+                    continue;
+                }
+                if segment_pixel_entry(a, b, p).is_some() {
+                    hits.push((si, p));
                 } else {
-                    // Distance filter (approximate, conservative): only centres within ~1
-                    // unit of the segment can lie on one of its fragments.
-                    let o = orient(a, b, p) as f64;
-                    if o * o <= 4.0 * len2 {
-                        near.push((si, p));
-                    }
+                    near.push((si, p));
                 }
             }
         }
     }
-    drop(by_leaf);
-    // Pixels partition the plane, so (entry value, closed-before-open) is a strict order.
-    hits.sort_unstable_by(|x, y| {
-        x.seg
-            .cmp(&y.seg)
-            .then_with(|| x.t.cmp(y.t))
-            .then(x.open.cmp(&y.open))
-    });
-    near.sort_unstable();
+    drop(pix);
+    let (hstart, hits) = csr(n, &hits);
+    let (nstart, near) = csr(n, &near);
 
-    // 4. Build fragments.
-    let mut out: Vec<Frag> = Vec::with_capacity(segs.len() + hits.len());
+    // 3. Build fragments.
+    let mut out: Vec<Frag> = Vec::with_capacity(n + hits.len() + near.len());
     let mut poly: Vec<Point> = Vec::new();
+    let mut ord: Vec<(i128, Point)> = Vec::new();
     let mut ins: Vec<(usize, i128, Point)> = Vec::new();
-    let mut hi = 0usize;
-    let mut ni = 0usize;
     for (si, &(a, b)) in segs.iter().enumerate() {
+        let h = &hits[hstart[si] as usize..hstart[si + 1] as usize];
+        let nr = &near[nstart[si] as usize..nstart[si + 1] as usize];
         let si = si as u32;
+        if h.is_empty() && nr.is_empty() {
+            out.push(Frag { a, b, src: si });
+            continue;
+        }
+        // Hot pixels are met in the order of their centres' projections on the segment
+        // direction (pixel rows and columns are traversed monotonically).
+        let d = sub(b, a);
+        ord.clear();
+        ord.extend(h.iter().map(|&p| (dot(sub(p, a), d), p)));
+        ord.sort_unstable();
         poly.clear();
         poly.push(a);
-        while hi < hits.len() && hits[hi].seg == si {
-            let p = hits[hi].p;
-            if *poly.last().unwrap() != p {
-                poly.push(p);
-            }
-            hi += 1;
-        }
-        if *poly.last().unwrap() != b {
-            poly.push(b);
-        }
+        poly.extend(ord.iter().map(|x| x.1));
+        poly.push(b);
         // T-junctions: hot pixel centres lying on a fragment's interior.
         ins.clear();
-        while ni < near.len() && near[ni].0 == si {
-            let c = near[ni].1;
-            ni += 1;
+        for &c in nr {
             for k in 0..poly.len() - 1 {
                 if in_segment_interior(poly[k], poly[k + 1], c) {
                     ins.push((k, crate::predicates::dist2(poly[k], c), c));
@@ -375,30 +370,22 @@ pub(crate) fn snap_round(segs: &[(Point, Point)]) -> Vec<Frag> {
                 }
             }
         }
-        if ins.is_empty() {
-            for w in poly.windows(2) {
-                out.push(Frag {
-                    a: w[0],
-                    b: w[1],
-                    src: si,
-                });
-            }
-        } else {
-            ins.sort_unstable();
-            let mut j = 0;
-            for k in 0..poly.len() - 1 {
-                let mut cur = poly[k];
-                while j < ins.len() && ins[j].0 == k {
-                    if ins[j].2 != cur {
-                        out.push(Frag {
-                            a: cur,
-                            b: ins[j].2,
-                            src: si,
-                        });
-                        cur = ins[j].2;
-                    }
-                    j += 1;
+        ins.sort_unstable();
+        let mut j = 0;
+        for k in 0..poly.len() - 1 {
+            let mut cur = poly[k];
+            while j < ins.len() && ins[j].0 == k {
+                if ins[j].2 != cur {
+                    out.push(Frag {
+                        a: cur,
+                        b: ins[j].2,
+                        src: si,
+                    });
+                    cur = ins[j].2;
                 }
+                j += 1;
+            }
+            if poly[k + 1] != cur {
                 out.push(Frag {
                     a: cur,
                     b: poly[k + 1],
@@ -421,16 +408,21 @@ pub(crate) struct Crossing {
 /// cross properly; otherwise splits each segment at every segment endpoint lying on its
 /// interior and returns the fragments (grouped by segment, ordered from `a` to `b`).
 pub(crate) fn node_exact(segs: &[(Point, Point)]) -> Result<Vec<Frag>, Crossing> {
+    let n = segs.len();
     let bboxes: Vec<Rect> = segs.iter().map(seg_bbox).collect();
-    let kd = Kd::build(segs, &bboxes);
+    let grid = Grid::build(segs, &bboxes);
     let mut order = Vec::new();
     let mut crossing: Option<Crossing> = None;
-    let mut splits: Vec<(u32, i128, Point)> = Vec::new();
-    for leaf in &kd.leaves {
-        for_each_pair(kd.leaf_items(leaf), &bboxes, &mut order, |i, j| {
+    let mut splits: Vec<(u32, (i128, Point))> = Vec::new();
+    for c in 0..grid.n_cells() {
+        let items = grid.items(c);
+        if items.len() < 2 {
+            continue;
+        }
+        for_each_pair(items, &bboxes, &mut order, |i, j| {
             let (a, b) = segs[i as usize];
-            let (c, d) = segs[j as usize];
-            if segments_cross_properly(a, b, c, d) {
+            let (p, q) = segs[j as usize];
+            if segments_cross_properly(a, b, p, q) {
                 let cr = Crossing {
                     i: i.min(j),
                     j: i.max(j),
@@ -440,10 +432,10 @@ pub(crate) fn node_exact(segs: &[(Point, Point)]) -> Result<Vec<Frag>, Crossing>
                 }
                 return;
             }
-            for (s, (p, q), pts) in [(i, (a, b), [c, d]), (j, (c, d), [a, b])] {
-                for v in pts {
-                    if in_region(leaf, v) && in_segment_interior(p, q, v) {
-                        splits.push((s, crate::predicates::dist2(p, v), v));
+            for (s, (u, v), pts) in [(i, (a, b), [p, q]), (j, (p, q), [a, b])] {
+                for x in pts {
+                    if grid.cell(x) == c && in_segment_interior(u, v, x) {
+                        splits.push((s, (crate::predicates::dist2(u, x), x)));
                     }
                 }
             }
@@ -452,21 +444,23 @@ pub(crate) fn node_exact(segs: &[(Point, Point)]) -> Result<Vec<Frag>, Crossing>
     if let Some(c) = crossing {
         return Err(c);
     }
-    splits.sort_unstable();
-    splits.dedup();
-    let mut out = Vec::with_capacity(segs.len() + splits.len());
-    let mut k = 0;
+    let (sstart, mut sp) = csr(n, &splits);
+    drop(splits);
+    let mut out = Vec::with_capacity(n + sp.len());
     for (si, &(a, b)) in segs.iter().enumerate() {
+        let s = &mut sp[sstart[si] as usize..sstart[si + 1] as usize];
+        s.sort_unstable();
         let si = si as u32;
         let mut cur = a;
-        while k < splits.len() && splits[k].0 == si {
-            out.push(Frag {
-                a: cur,
-                b: splits[k].2,
-                src: si,
-            });
-            cur = splits[k].2;
-            k += 1;
+        for &(_, x) in s.iter() {
+            if x != cur {
+                out.push(Frag {
+                    a: cur,
+                    b: x,
+                    src: si,
+                });
+                cur = x;
+            }
         }
         out.push(Frag { a: cur, b, src: si });
     }

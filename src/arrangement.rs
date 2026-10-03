@@ -56,38 +56,83 @@ impl Arrangement {
 
     /// Builds the arrangement from already-noded fragments of `input`.
     pub fn from_frags(input: &[InEdge], frags: Vec<Frag>) -> Arrangement {
-        // Closed fragments as (lo, hi, operand, sign, tag); open ones kept apart.
-        let mut f: Vec<(Point, Point, u8, i8, u64)> = Vec::with_capacity(frags.len());
+        struct F {
+            lo: Point,
+            hi: Point,
+            tag: u64,
+            /// `u32::MAX` for closed fragments, else the open fragment index.
+            open: u32,
+            operand: u8,
+            sign: i8,
+        }
+        let mut f: Vec<F> = Vec::with_capacity(frags.len());
         let mut open_frags = Vec::new();
         for fr in &frags {
             let e = &input[fr.src as usize];
-            if e.operand >= 2 {
-                open_frags.push(*fr);
-            } else if fr.a < fr.b {
-                f.push((fr.a, fr.b, e.operand, 1, e.tag));
+            let (lo, hi, sign) = if fr.a < fr.b {
+                (fr.a, fr.b, 1)
             } else {
-                f.push((fr.b, fr.a, e.operand, -1, e.tag));
-            }
+                (fr.b, fr.a, -1)
+            };
+            let open = if e.operand >= 2 {
+                open_frags.push(*fr);
+                open_frags.len() as u32 - 1
+            } else {
+                u32::MAX
+            };
+            f.push(F {
+                lo,
+                hi,
+                tag: e.tag,
+                open,
+                operand: e.operand,
+                sign,
+            });
         }
         drop(frags);
-        f.sort_unstable();
-        let mut edges: Vec<MEdge> = Vec::with_capacity(f.len() + open_frags.len());
+        let t0 = std::time::Instant::now();
+        // One sort into sweep order. Coincident fragments are adjacent (same start, same
+        // direction); closed ones come first, ordered by operand, sign and tag so the merge
+        // below is deterministic.
+        f.sort_unstable_by(|a, b| {
+            cmp_sweep_edges((a.lo, a.hi), (b.lo, b.hi))
+                .then_with(|| a.hi.cmp(&b.hi))
+                .then_with(|| (b.open == u32::MAX).cmp(&(a.open == u32::MAX)))
+                .then_with(|| {
+                    (a.operand, a.sign, a.tag, a.open).cmp(&(b.operand, b.sign, b.tag, b.open))
+                })
+        });
+        if f.len() > 1000000 {
+            eprintln!("frag sort {:?}", t0.elapsed());
+        }
+        let mut edges: Vec<MEdge> = Vec::with_capacity(f.len());
         let mut i = 0;
         while i < f.len() {
-            let (lo, hi) = (f[i].0, f[i].1);
+            let (lo, hi) = (f[i].lo, f[i].hi);
+            if f[i].open != u32::MAX {
+                edges.push(MEdge {
+                    lo,
+                    hi,
+                    delta: [0, 0],
+                    tag: f[i].tag,
+                    open: Some(f[i].open),
+                });
+                i += 1;
+                continue;
+            }
             let mut j = i;
             let mut delta = [0i32; 2];
-            while j < f.len() && f[j].0 == lo && f[j].1 == hi {
-                delta[f[j].2 as usize] += f[j].3 as i32;
+            while j < f.len() && f[j].open == u32::MAX && f[j].lo == lo && f[j].hi == hi {
+                delta[f[j].operand as usize] += f[j].sign as i32;
                 j += 1;
             }
             if delta != [0, 0] {
-                // Tag: first contributor (the group is sorted by operand, sign, tag) whose
-                // operand has a non-zero net change.
+                // Tag: first contributor (by operand, sign, tag) whose operand has a non-zero
+                // net change.
                 let tag = f[i..j]
                     .iter()
-                    .find(|x| delta[x.2 as usize] != 0)
-                    .map_or(f[i].4, |x| x.4);
+                    .find(|x| delta[x.operand as usize] != 0)
+                    .map_or(f[i].tag, |x| x.tag);
                 edges.push(MEdge {
                     lo,
                     hi,
@@ -99,24 +144,6 @@ impl Arrangement {
             i = j;
         }
         drop(f);
-        for (k, fr) in open_frags.iter().enumerate() {
-            let (lo, hi) = if fr.a < fr.b {
-                (fr.a, fr.b)
-            } else {
-                (fr.b, fr.a)
-            };
-            let tag = input[fr.src as usize].tag;
-            edges.push(MEdge {
-                lo,
-                hi,
-                delta: [0, 0],
-                tag,
-                open: Some(k as u32),
-            });
-        }
-        edges.sort_unstable_by(|a, b| {
-            cmp_sweep_edges((a.lo, a.hi), (b.lo, b.hi)).then_with(|| a.open.cmp(&b.open))
-        });
         let segs: Vec<(Point, Point)> = edges.iter().map(|e| (e.lo, e.hi)).collect();
         let mut below = vec![[0i32; 2]; edges.len()];
         sweep(&segs, |e, b| {
