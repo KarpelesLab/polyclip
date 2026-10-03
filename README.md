@@ -89,6 +89,15 @@ direction), and distance queries use direction-adaptive sweeps and bounding-volu
 hierarchies, so long, dense or parallel edges at any angle do not degrade into quadratic
 behaviour.
 
+## Limitations
+
+- The spec's indicative target for the union of 50 000 heavily overlapping circles
+  (< 300 ms) is not met (~3 s single-threaded; Clipper2 needs minutes on the same input).
+  Realistic zone fills, offsets and distance queries meet their targets.
+- Arcs are approximated (with a guaranteed error side) rather than handled natively by
+  the booleans; provenance tags let callers rebuild arcs afterwards (`arcs_from_tags`).
+- There is no incremental engine yet: refilling a zone recomputes it fully.
+
 ## Feature flags
 
 - `serde`: `Serialize`/`Deserialize` for all data types.
