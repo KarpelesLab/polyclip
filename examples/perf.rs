@@ -198,6 +198,18 @@ fn main() {
         );
         return;
     }
+    if std::env::args().any(|a| a == "bigdist") {
+        let a = circle(0, 0, 50_000_000.0, 50_000);
+        let b = circle(120_000_000, 0, 50_000_000.0, 50_000);
+        let t = Instant::now();
+        let c = distance(&a, &b).unwrap();
+        println!(
+            "distance between two 50k-vertex circles: {:?} -> {}",
+            t.elapsed(),
+            c.sq.distance_f64()
+        );
+        return;
+    }
     if std::env::args().any(|a| a == "dist") {
         distance_bench();
         return;

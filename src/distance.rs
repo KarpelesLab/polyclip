@@ -248,9 +248,14 @@ pub fn distance<A: Geometry + ?Sized, B: Geometry + ?Sized>(a: &A, b: &B) -> Opt
     let radius =
         |c: &Closest| -> i64 { (libm::ceil(c.sq.distance_f64()) as i64).saturating_add(2) };
     let mut r = radius(&best);
+    // Segments of `b` overlapping `x`'s grown x-range start no earlier than
+    // `x.min.x - r - max_width` in the min-x order.
+    let max_width = sb.iter().map(|s| s.2.width()).max().unwrap_or(0);
     for x in &sa {
         let lim = x.2.max.x.saturating_add(r);
-        for y in &sb {
+        let from_x = x.2.min.x.saturating_sub(r).saturating_sub(max_width);
+        let from = sb.partition_point(|s| s.2.min.x < from_x);
+        for y in &sb[from..] {
             if y.2.min.x > lim {
                 break;
             }
