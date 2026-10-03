@@ -1,0 +1,7 @@
+/target
+**/*.rs.bk
+.*.swp
+# Library crate: Cargo.lock intentionally not committed.
+/Cargo.lock
+# Claude Code session/worktree state
+.claude/

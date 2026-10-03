@@ -1,0 +1,116 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+# A newer push to the same branch (or PR) supersedes this run: cancel the
+# older one instead of queueing every intermediate commit.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test & lint (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}
+
+      - name: Format
+        if: runner.os == 'Linux' # formatting is platform-independent
+        run: cargo fmt --all --check
+
+      - name: Clippy (all features, warnings denied)
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Test (all features)
+        run: cargo test --all-features
+
+      # The release build exercises the optimized arithmetic paths (overflow
+      # checks off) that the property tests otherwise only see in debug.
+      - name: Test (release)
+        run: cargo test --release --all-features
+
+  # Output is promised to be bit-identical across platforms; 32-bit targets
+  # catch accidental `usize`-width assumptions.
+  i686:
+    name: Test (i686 Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: i686-unknown-linux-gnu
+
+      - name: Install multilib
+        run: sudo apt-get update && sudo apt-get install -y gcc-multilib
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: i686
+
+      - name: Test
+        run: cargo test --target i686-unknown-linux-gnu --all-features
+
+  msrv:
+    name: MSRV (Rust 1.89)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      # Keep this pin in sync with `rust-version` in Cargo.toml. Compiling on
+      # the declared minimum guards against accidentally using a std/library or
+      # language feature newer than 1.89.
+      - name: Install Rust 1.89 (declared MSRV)
+        uses: dtolnay/rust-toolchain@1.89
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv
+
+      - name: cargo check --all-features --lib
+        run: cargo check --all-features --lib
+
+  docs:
+    name: Docs build (warnings denied)
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: -D warnings -D rustdoc::broken-intra-doc-links
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo doc --no-deps --all-features
+        run: cargo doc --no-deps --all-features

@@ -1,0 +1,32 @@
+# The cargo-fuzz crate under `fuzz/` (nightly + libFuzzer) is built separately
+# with `cargo +nightly fuzz run <target>`; keep it out of the implicit workspace.
+[workspace]
+exclude = ["fuzz"]
+
+[package]
+name = "polyclip"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.89"
+description = "Exact integer 2D polygon geometry: booleans, offsetting, arcs, distance queries, fracture, triangulation."
+repository = "https://github.com/KarpelesLab/polyclip"
+license = "MIT"
+keywords = ["polygon", "clipping", "geometry", "offset", "boolean"]
+categories = ["algorithms", "graphics", "mathematics"]
+exclude = [".github", "fuzz", "testdata"]
+
+[package.metadata.docs.rs]
+all-features = true
+
+[features]
+default = []
+serde = ["dep:serde"]
+
+[dependencies]
+# Pure-Rust libm: identical transcendental results on every platform, which
+# keeps arc approximation bit-for-bit deterministic.
+libm = "0.2"
+serde = { version = "1", features = ["derive"], optional = true }
+
+[dev-dependencies]
+proptest = { version = "1", default-features = false, features = ["std"] }
