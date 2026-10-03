@@ -341,6 +341,16 @@ fn for_each_pair(
     order: &mut Vec<(i128, i128, u32)>,
     mut f: impl FnMut(u32, u32),
 ) {
+    pairs_dyn(segs, items, bboxes, order, &mut f)
+}
+
+fn pairs_dyn(
+    segs: &[(Point, Point)],
+    items: &[u32],
+    bboxes: &[Rect],
+    order: &mut Vec<(i128, i128, u32)>,
+    f: &mut dyn FnMut(u32, u32),
+) {
     if items.len() <= 24 {
         for (k, &i) in items.iter().enumerate() {
             let bi = &bboxes[i as usize];
@@ -350,6 +360,39 @@ fn for_each_pair(
                 }
             }
         }
+        return;
+    }
+    // A hub — an endpoint shared by many segments of the leaf — makes every pair of its
+    // segments overlap in any projection. Two segments sharing an endpoint can only meet
+    // elsewhere if they are collinear in the same direction, so hub pairs are found by
+    // sorting the hub's segments by angle; the rest goes through the sweeps.
+    if items.len() > 64
+        && let Some((hub, h, rest)) = split_hub(segs, items)
+    {
+        let dir = |i: u32| {
+            let (a, b) = segs[i as usize];
+            if a == hub { sub(b, a) } else { sub(a, b) }
+        };
+        let mut hs = h;
+        hs.sort_unstable_by(|&x, &y| crate::predicates::cmp_angle(dir(x), dir(y)).then(x.cmp(&y)));
+        let mut k = 0;
+        while k < hs.len() {
+            let mut e = k + 1;
+            while e < hs.len()
+                && crate::predicates::cross(dir(hs[k]), dir(hs[e])) == 0
+                && dot(dir(hs[k]), dir(hs[e])) > 0
+            {
+                e += 1;
+            }
+            for x in k..e {
+                for y in x + 1..e {
+                    f(hs[x], hs[y]);
+                }
+            }
+            k = e;
+        }
+        pairs_dyn(segs, &rest, bboxes, order, f);
+        bipartite_pairs(&hs, &rest, bboxes, f);
         return;
     }
     // Sweep-and-prune along the direction where the segments are thinnest: segments that
@@ -371,6 +414,57 @@ fn for_each_pair(
                 f(i, j);
             }
         }
+    }
+}
+
+/// The most frequent endpoint of `items` if it is shared by many of them: (hub, segments
+/// incident to it, the others).
+fn split_hub(segs: &[(Point, Point)], items: &[u32]) -> Option<(Point, Vec<u32>, Vec<u32>)> {
+    let mut ends: Vec<Point> = items
+        .iter()
+        .flat_map(|&i| [segs[i as usize].0, segs[i as usize].1])
+        .collect();
+    ends.sort_unstable();
+    let (mut best, mut best_n) = (ends[0], 0usize);
+    let mut k = 0;
+    while k < ends.len() {
+        let mut e = k;
+        while e < ends.len() && ends[e] == ends[k] {
+            e += 1;
+        }
+        if e - k > best_n {
+            (best, best_n) = (ends[k], e - k);
+        }
+        k = e;
+    }
+    if best_n < 16 || best_n * 4 < items.len() {
+        return None;
+    }
+    let (h, rest): (Vec<u32>, Vec<u32>) = items
+        .iter()
+        .partition(|&&i| segs[i as usize].0 == best || segs[i as usize].1 == best);
+    Some((best, h, rest))
+}
+
+/// Calls `f` for every pair across `a` and `b` whose bounding boxes overlap (sweep along x).
+fn bipartite_pairs(a: &[u32], b: &[u32], bboxes: &[Rect], f: &mut dyn FnMut(u32, u32)) {
+    let mut ev: Vec<(i64, bool, u32)> = a
+        .iter()
+        .map(|&i| (bboxes[i as usize].min.x, false, i))
+        .collect();
+    ev.extend(b.iter().map(|&i| (bboxes[i as usize].min.x, true, i)));
+    ev.sort_unstable();
+    let mut act: [Vec<u32>; 2] = [Vec::new(), Vec::new()];
+    for (x, side, i) in ev {
+        let other = &mut act[!side as usize];
+        other.retain(|&j| bboxes[j as usize].max.x >= x);
+        let bi = &bboxes[i as usize];
+        for &j in other.iter() {
+            if bi.intersects(&bboxes[j as usize]) {
+                f(i, j);
+            }
+        }
+        act[side as usize].push(i);
     }
 }
 
@@ -1102,6 +1196,40 @@ mod tests {
                 .collect();
             let f = snap_round(&segs);
             assert_noded(&f);
+        }
+    }
+
+    #[test]
+    fn random_hub_noded() {
+        // Many segments sharing one endpoint, some collinear (overlapping), plus others.
+        let mut s: u64 = 77;
+        let mut rnd = |m: i64| {
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((s >> 33) as i64).rem_euclid(m)
+        };
+        for _ in 0..60 {
+            let hub = p(rnd(50), rnd(50));
+            let mut segs: Vec<(Point, Point)> = (0..120)
+                .map(|_| {
+                    let (dx, dy) = (rnd(9) - 4, rnd(9) - 4);
+                    let k = 1 + rnd(12);
+                    (hub, p(hub.x + dx * k, hub.y + dy * k))
+                })
+                .filter(|(a, b)| a != b)
+                .collect();
+            for _ in 0..30 {
+                segs.push((
+                    p(rnd(100) - 25, rnd(100) - 25),
+                    p(rnd(100) - 25, rnd(100) - 25),
+                ));
+            }
+            segs.retain(|(a, b)| a != b);
+            assert_noded(&snap_round(&segs));
+            if let Ok(f) = node_exact(&segs) {
+                assert_noded(&f);
+            }
         }
     }
 

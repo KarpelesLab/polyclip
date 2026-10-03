@@ -2,7 +2,7 @@
 //! left of every edge) into canonical rings and their nesting tree.
 
 use crate::geom::{Point, PolyNode, PolyTree, Ring};
-use crate::predicates::{cmp_dir_halfplane, cross, dot, orient, sub};
+use crate::predicates::{cmp_angle, cmp_dir_halfplane, cross, dot, orient, sub};
 use crate::query::ring_area2;
 use crate::sweep::{cmp_sweep_edges, sweep};
 use core::cmp::Ordering;
@@ -48,7 +48,15 @@ fn cmp_cw_from(r: Point, a: Point, b: Point) -> Ordering {
 pub(crate) fn link_rings(edges: &[DirEdge]) -> (Vec<Vec<u32>>, Vec<Point>) {
     let n = edges.len();
     let mut perm: Vec<u32> = (0..n as u32).collect();
-    perm.sort_unstable_by_key(|&k| edges[k as usize].from);
+    // By start vertex, then counter-clockwise by direction (so the clockwise successor of
+    // an incoming edge at a busy vertex is found by binary search).
+    let d = |k: u32| sub(edges[k as usize].to, edges[k as usize].from);
+    perm.sort_unstable_by(|&a, &b| {
+        edges[a as usize]
+            .from
+            .cmp(&edges[b as usize].from)
+            .then_with(|| cmp_angle(d(a), d(b)))
+    });
     let from = |pos: usize| edges[perm[pos] as usize].from;
     // Pinch vertices: out-degree > 1.
     let mut pinch: Vec<Point> = Vec::new();
@@ -88,22 +96,31 @@ pub(crate) fn link_rings(edges: &[DirEdge]) -> (Vec<Vec<u32>>, Vec<Point>) {
                 perm[lo] as usize
             } else {
                 let r = sub(e.from, e.to);
-                let mut best: Option<usize> = None;
-                for &k in &perm[lo..hi] {
-                    let k = k as usize;
-                    if used[k] && k != start {
-                        continue;
+                // First out-edge clockwise from `r`: the last one at an angle below `r`'s,
+                // cyclically. Valid boundaries alternate in/out, so it is the unused one.
+                let at =
+                    lo + perm[lo..hi].partition_point(|&k| cmp_angle(d(k), r) == Ordering::Less);
+                let cand = perm[if at == lo { hi - 1 } else { at - 1 }] as usize;
+                if !used[cand] || cand == start {
+                    cand
+                } else {
+                    let mut best: Option<usize> = None;
+                    for &k in &perm[lo..hi] {
+                        let k = k as usize;
+                        if used[k] && k != start {
+                            continue;
+                        }
+                        let d = sub(edges[k].to, edges[k].from);
+                        if best.is_none_or(|b| {
+                            cmp_cw_from(r, d, sub(edges[b].to, edges[b].from)) == Ordering::Less
+                        }) {
+                            best = Some(k);
+                        }
                     }
-                    let d = sub(edges[k].to, edges[k].from);
-                    if best.is_none_or(|b| {
-                        cmp_cw_from(r, d, sub(edges[b].to, edges[b].from)) == Ordering::Less
-                    }) {
-                        best = Some(k);
+                    match best {
+                        Some(b) => b,
+                        None => break,
                     }
-                }
-                match best {
-                    Some(b) => b,
-                    None => break,
                 }
             };
             if next == start {
