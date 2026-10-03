@@ -13,6 +13,7 @@ mod node;
 mod offset;
 pub mod predicates;
 mod query;
+mod simplify;
 mod sweep;
 mod validate;
 
@@ -29,4 +30,5 @@ pub use query::{
     Geometry, Location, Segment, area2, centroid, contains, intersects, locate, locate_in_polygon,
     locate_in_ring, ring_area2, ring_winding,
 };
+pub use simplify::{simplify_path, simplify_polygon, simplify_polygons};
 pub use validate::{RingId, ValidityError, check_canonical, validate, validate_set};
