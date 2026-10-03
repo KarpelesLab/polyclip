@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 2323cb08e5bb421a74c37becba78977b5748e5594730791bbbfbe93a4800a20e # shrinks to rs = [Ring([Point { x: 1, y: 8 }, Point { x: -11, y: 9 }, Point { x: 0, y: 0 }, Point { x: 4, y: 0 }]), Ring([Point { x: 6, y: 0 }, Point { x: 5, y: -2 }, Point { x: -12, y: 14 }, Point { x: 0, y: 0 }]), Ring([Point { x: -9, y: 0 }, Point { x: 4, y: 0 }, Point { x: 1, y: 11 }, Point { x: -1, y: 4 }]), Ring([Point { x: 10, y: -10 }, Point { x: -13, y: 4 }, Point { x: -2, y: 13 }]), Ring([Point { x: 0, y: 0 }, Point { x: -13, y: 9 }, Point { x: 14, y: 13 }, Point { x: -2, y: 5 }, Point { x: -11, y: -8 }, Point { x: 2, y: 7 }]), Ring([Point { x: 1, y: 10 }, Point { x: -6, y: 10 }, Point { x: -7, y: 12 }, Point { x: 5, y: -7 }])], tol = 2

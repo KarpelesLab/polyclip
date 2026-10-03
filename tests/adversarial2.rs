@@ -1,6 +1,6 @@
 //! Second adversarial review.
 //!
-//! The first group reproduces confirmed bugs (ignored until fixed, each with expected vs
+//! The first group reproduces bugs found by the review (all fixed; each documents expected vs
 //! actual and the suspected root cause). The second group holds randomized differential
 //! checks of code that was investigated and found correct (distance / intersection sweeps
 //! against brute force, trapezoid coverage, triangulation and offset invariants).
@@ -47,7 +47,6 @@ impl Rng {
 /// The holes are visited by `visit_segments` all the same. (Fallible operations check
 /// every vertex and correctly report `CoordinateOutOfRange`.)
 #[test]
-#[ignore = "bug: range checks of infallible queries ignore polygon holes (overflow panic)"]
 fn out_of_range_hole_is_detected() {
     let big = i64::MAX;
     let q = Polygon::new(
@@ -75,7 +74,6 @@ fn out_of_range_hole_is_detected() {
 /// the sign is noise. The straight part could be summed exactly in `i128` relative to the
 /// first vertex (like `ring_area2`), adding only the circular-segment terms in `f64`.
 #[test]
-#[ignore = "bug: Shape orientation decided by an f64 shoelace sum with catastrophic cancellation"]
 fn shape_orientation_far_from_origin() {
     let pts = [
         p(1_000_767_959, 1_000_279_385),
@@ -102,7 +100,6 @@ fn shape_orientation_far_from_origin() {
 /// it should be derived from the run itself (e.g. the sign of `orient(center, run start,
 /// next vertex)`), or `arc_of` should return only the centre.
 #[test]
-#[ignore = "bug: arcs_from_tags rebuilds reversed arc runs (holes, differences) the wrong way"]
 fn arcs_from_tags_reversed_run() {
     let tol = ArcTol::new(10, Side::Outside);
     let pad = TaggedRing::uniform(Circle::new(p(0, 0), 10_000).to_ring(tol).unwrap(), 7);
@@ -115,7 +112,7 @@ fn arcs_from_tags_reversed_run() {
         .unwrap();
     assert_eq!(res.len(), 1);
     // The pad's arc as tagged: centre (0, 0), counter-clockwise (as approximated).
-    let arc_of = |t: u64| (t == 7).then_some((p(0, 0), true));
+    let arc_of = |t: u64| (t == 7).then_some(p(0, 0));
     let contour = arcs_from_tags(&res[0].outer, &arc_of);
     let back = Shape::new(contour, vec![])
         .to_polygon(ArcTol::new(10, Side::Nearest))
@@ -143,7 +140,6 @@ fn arcs_from_tags_reversed_run() {
 /// pushed next to its opposite copy, which the direction-order check
 /// (src/triangulate.rs:374-378) rejects as overlapping.
 #[test]
-#[ignore = "bug: triangulate rejects shared partial edges (split + cancel) it documents as valid"]
 fn triangulate_partially_shared_edges() {
     let set = [
         Polygon::from(rect(0, 0, 20, 10)),
@@ -170,7 +166,7 @@ fn triangulate_partially_shared_edges() {
 /// `link_rings` (src/assemble.rs:88-103) scans every out-edge of a pinch vertex for each
 /// arriving edge: O(k^2) again.
 #[test]
-#[ignore = "bug: union is quadratic in the degree of a shared vertex (release-only timing)"]
+#[cfg_attr(debug_assertions, ignore = "timing assertion: release builds only")]
 fn union_of_polygons_sharing_one_vertex_is_fast() {
     let k = 8000;
     let r = 1_000_000_000.0f64;
@@ -206,7 +202,6 @@ fn union_of_polygons_sharing_one_vertex_is_fast() {
 /// would iterate to a fixpoint, or order the work canonically (e.g. sort rings by vertex
 /// sequence and anchor at the minimum vertex).
 #[test]
-#[ignore = "bug: simplify_polygons result depends on polygon order / ring start (greedy)"]
 fn simplify_polygons_order_independent() {
     let a = Polygon::from(Ring::from([(0, 0), (10, 0), (10, 10), (5, 9), (0, 10)]));
     let b = Polygon::from(Ring::from([(0, 11), (5, 10), (10, 11), (10, 20), (0, 20)]));
