@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc baae074ab8ece2833b46e545eb52193920f76e142d88f86337ba770e13246d8c # shrinks to outer = [Ring([Point { x: -17, y: 0 }, Point { x: 0, y: 8 }, Point { x: 0, y: 0 }])], cuts = [Ring([Point { x: -84, y: 64 }, Point { x: -10, y: -1 }, Point { x: -51, y: 51 }]), Ring([Point { x: -53, y: 0 }, Point { x: 0, y: 0 }, Point { x: 0, y: 1 }])], small = true
+cc 5fb06f8abf6f2627c59c926075469474a1db4637b0c41581d6ebad7d2b6cd5ca # shrinks to outer = [Ring([Point { x: -1, y: -84 }, Point { x: -69, y: 0 }, Point { x: 0, y: 0 }])], cuts = [Ring([Point { x: 19, y: -72 }, Point { x: -45, y: 19 }, Point { x: -70, y: 52 }]), Ring([Point { x: 2, y: 9 }, Point { x: 51, y: -31 }, Point { x: -80, y: -57 }]), Ring([Point { x: 0, y: 0 }, Point { x: -80, y: 74 }, Point { x: 35, y: -64 }]), Ring([Point { x: 27, y: 30 }, Point { x: -33, y: -73 }, Point { x: -20, y: -1 }])], small = true

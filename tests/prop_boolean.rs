@@ -97,6 +97,15 @@ proptest! {
     }
 
     #[test]
+    fn idempotent(a in rings(12, 4, 8), b in rings(1000, 4, 8), ra in rule(), o in op()) {
+        // Canonical output fed back through a union is unchanged.
+        let r = run(o, &a, &b, ra, ra);
+        prop_assert_eq!(&union_all(&r, FillRule::NonZero).unwrap(), &r);
+        let t = Boolean::new().subject(&r, FillRule::EvenOdd).execute().unwrap();
+        prop_assert_eq!(&t, &r);
+    }
+
+    #[test]
     fn general_valid_large(a in rings(1 << 40, 3, 7), b in rings(1 << 40, 3, 7), ra in rule(), o in op()) {
         let r = run(o, &a, &b, ra, ra);
         prop_assert_eq!(check_canonical(&r, true), Ok(()));
