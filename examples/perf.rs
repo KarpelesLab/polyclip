@@ -130,6 +130,42 @@ fn main() {
         );
         return;
     }
+    if std::env::args().any(|a| a == "opening") {
+        let mut s = 42u64;
+        let zone = Ring::from([
+            (0, 0),
+            (100_000_000, 0),
+            (100_000_000, 100_000_000),
+            (0, 100_000_000),
+        ]);
+        let obst: Vec<Ring> = (0..5000)
+            .map(|_| {
+                circle(
+                    (lcg(&mut s) % 100_000_000) as i64,
+                    (lcg(&mut s) % 100_000_000) as i64,
+                    300_000.0,
+                    32,
+                )
+            })
+            .collect();
+        let fill = boolean(Op::Difference, &zone, &obst, FillRule::NonZero).unwrap();
+        let tol = ArcTol::new(1000, Side::Inside);
+        let t = Instant::now();
+        let a = offset(&fill, -100_000, Join::Round, tol).unwrap();
+        println!(
+            "shrink: {:?} -> {} verts",
+            t.elapsed(),
+            a.iter().map(|p| p.vertex_count()).sum::<usize>()
+        );
+        let t = Instant::now();
+        let b = offset(&a, 100_000, Join::Round, tol).unwrap();
+        println!(
+            "grow: {:?} -> {} verts",
+            t.elapsed(),
+            b.iter().map(|p| p.vertex_count()).sum::<usize>()
+        );
+        return;
+    }
     if std::env::args().any(|a| a == "zone") {
         let mut s = 42u64;
         let zone = Ring::from([

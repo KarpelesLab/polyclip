@@ -11,8 +11,11 @@
 //! * `offset_10k`: offset of a 10 000-vertex polygon by +0.1 mm with round joins
 //!   (1 µm arc tolerance), convex (circle) and non-convex (wavy star); target < 10 ms.
 //!
-//! Distance-query benchmarks (`distance_less_than` between two 64-vertex polygons) will
-//! be added with the distance API.
+//! * `distance_less_than`: DRC-style threshold queries between 64-vertex polygons (target
+//!   < 1 µs on average including bounding-box rejection), and between near pairs only.
+//! * `zone_pipeline`: fracture and triangulation of the zone-fill result.
+//! * `pathological`: 50 000 stacked axis-parallel slots and 50 000 diagonal slots (long,
+//!   dense, parallel edges).
 //!
 //! `cargo bench` runs everything with small sample sizes (a few seconds per benchmark);
 //! filter with e.g. `cargo bench --bench workloads -- union_circles/1000`.
@@ -142,5 +145,104 @@ fn offset_10k(c: &mut Criterion) {
     g.finish();
 }
 
-criterion_group!(benches, union_circles, zone_minus_obstacles, offset_10k);
+fn distance_queries(c: &mut Criterion) {
+    let mut s = Lcg(5);
+    let shapes: Vec<Ring> = (0..1000)
+        .map(|_| circle(s.below(10 * MM), s.below(10 * MM), 300_000.0, 64))
+        .collect();
+    let d = 200_000;
+    let mut all = Vec::new();
+    let mut near = Vec::new();
+    for i in 0..shapes.len() {
+        let bi = shapes[i].bbox().unwrap();
+        for (j, sj) in shapes.iter().enumerate().skip(i + 1).take(100) {
+            all.push((i, j));
+            if bi.expand(d).intersects(&sj.bbox().unwrap()) {
+                near.push((i, j));
+            }
+        }
+    }
+    let mut g = c.benchmark_group("distance_less_than");
+    g.sample_size(20);
+    g.warm_up_time(Duration::from_millis(500));
+    g.measurement_time(Duration::from_secs(3));
+    for (name, pairs) in [("mixed_pairs", &all), ("near_pairs", &near)] {
+        g.throughput(Throughput::Elements(pairs.len() as u64));
+        g.bench_with_input(BenchmarkId::new("64v", name), pairs, |b, pairs| {
+            b.iter(|| {
+                pairs
+                    .iter()
+                    .filter(|&&(i, j)| {
+                        distance_less_than(black_box(&shapes[i]), black_box(&shapes[j]), d)
+                    })
+                    .count()
+            })
+        });
+    }
+    g.finish();
+}
+
+fn zone_pipeline(c: &mut Criterion) {
+    let (zone, obst) = zone_and_obstacles(7);
+    let fill = boolean(Op::Difference, &zone, &obst, FillRule::NonZero).unwrap();
+    let mut g = c.benchmark_group("zone_pipeline");
+    g.sample_size(10);
+    g.warm_up_time(Duration::from_millis(500));
+    g.measurement_time(Duration::from_secs(3));
+    g.bench_function("fracture", |b| {
+        b.iter(|| fracture_set(black_box(&fill)).unwrap())
+    });
+    g.bench_function("triangulate", |b| {
+        b.iter(|| triangulate_set(black_box(&fill)).unwrap())
+    });
+    g.bench_function("opening_0.1mm", |b| {
+        b.iter(|| opening(black_box(&fill), MM / 10, ArcTol::new(1_000, Side::Inside)).unwrap())
+    });
+    g.finish();
+}
+
+fn pathological(c: &mut Criterion) {
+    let slots: Vec<Ring> = (0..50_000i64)
+        .map(|i| {
+            Ring::from([
+                (0, 20 * i),
+                (1_000_000, 20 * i),
+                (1_000_000, 20 * i + 10),
+                (0, 20 * i + 10),
+            ])
+        })
+        .collect();
+    let diag: Vec<Ring> = (0..50_000i64)
+        .map(|i| {
+            let (x, y) = (20 * i, -20 * i);
+            Ring::from([
+                (x, y),
+                (x + 700_000, y + 700_000),
+                (x + 700_010, y + 699_990),
+                (x + 10, y - 10),
+            ])
+        })
+        .collect();
+    let mut g = c.benchmark_group("pathological");
+    g.sample_size(10);
+    g.warm_up_time(Duration::from_millis(500));
+    g.measurement_time(Duration::from_secs(3));
+    g.bench_function("stacked_slots_50k", |b| {
+        b.iter(|| union_all(black_box(&slots), FillRule::NonZero).unwrap())
+    });
+    g.bench_function("diagonal_slots_50k", |b| {
+        b.iter(|| union_all(black_box(&diag), FillRule::NonZero).unwrap())
+    });
+    g.finish();
+}
+
+criterion_group!(
+    benches,
+    union_circles,
+    zone_minus_obstacles,
+    offset_10k,
+    distance_queries,
+    zone_pipeline,
+    pathological
+);
 criterion_main!(benches);

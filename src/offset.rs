@@ -155,7 +155,22 @@ fn emit_vertex(
         (cr > 0) == (delta > 0.0)
     };
     if !convex {
-        // Offset edges overlap: route through the vertex itself.
+        // Offset edges overlap. When they intersect well inside both (the trimmed length
+        // |delta| * tan(turn / 2) is at most half of each adjacent edge, so neighbouring
+        // trims cannot overlap either), use that intersection: the same region without a
+        // loop. Otherwise route through the vertex itself, which is always correct.
+        let c = d1.dot(d2);
+        let sn = (d1.x * d2.y - d1.y * d2.x).abs();
+        if c > -0.9 {
+            let trim = delta.abs() * sn / (1.0 + c);
+            let len1 = libm::hypot((cur.x - prev.x) as f64, (cur.y - prev.y) as f64);
+            let len2 = libm::hypot((next.x - cur.x) as f64, (next.y - cur.y) as f64);
+            if trim <= 0.5 * len1 && trim <= 0.5 * len2 {
+                let m = n1.add(n2).scale(delta / (1.0 + c));
+                push(out, at(cur, m)?);
+                return Ok(VKind::Straight);
+            }
+        }
         push(out, at(cur, u1)?);
         push(out, cur);
         push(out, at(cur, u2)?);
