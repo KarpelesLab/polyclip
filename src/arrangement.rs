@@ -51,6 +51,11 @@ impl Arrangement {
             Noding::Exact => node_exact(&segs)?,
         };
         drop(segs);
+        Ok(Self::from_frags(input, frags))
+    }
+
+    /// Builds the arrangement from already-noded fragments of `input`.
+    pub fn from_frags(input: &[InEdge], frags: Vec<Frag>) -> Arrangement {
         // Closed fragments as (lo, hi, operand, sign, tag); open ones kept apart.
         let mut f: Vec<(Point, Point, u8, i8, u64)> = Vec::with_capacity(frags.len());
         let mut open_frags = Vec::new();
@@ -123,11 +128,11 @@ impl Arrangement {
                 ];
             }
         });
-        Ok(Arrangement {
+        Arrangement {
             edges,
             below,
             open_frags,
-        })
+        }
     }
 
     /// Winding numbers below and above edge `k`. For an open fragment lying on a closed

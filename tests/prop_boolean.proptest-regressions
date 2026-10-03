@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 61c1b08a82775c1919f2dee0273ab51ca8920e5807a933be15dd12c69b76f719 # shrinks to paths = [[(-20, 16), (18, 8)]], clip = [Ring([Point { x: -15, y: 0 }, Point { x: -13, y: 15 }, Point { x: 0, y: -1 }, Point { x: 0, y: 0 }])]
