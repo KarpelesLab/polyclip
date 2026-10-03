@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.4](https://github.com/KarpelesLab/polyclip/compare/v0.0.3...v0.0.4) - 2026-10-03
+
+### Added
+
+- incremental zone refill engine
+- arc-preserving booleans on curved shapes
+
+### Other
+
+- index polygon sets when testing component containment
+- mention incremental ZoneFill
+- benchmark incremental zone refill
+- mention curved_boolean in README and crate overview
+- Merge branch 'worktree-agent-aa4656f3741b6d483'
+
 ## [0.0.3](https://github.com/KarpelesLab/polyclip/compare/v0.0.2...v0.0.3) - 2026-10-03
 
 ### Fixed
