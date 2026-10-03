@@ -43,6 +43,8 @@ jobs:
           - arc
           - query
           - validate
+          - polygon_tools
+          - distance
     steps:
       - uses: actions/checkout@v6
 

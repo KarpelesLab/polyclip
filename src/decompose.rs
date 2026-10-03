@@ -38,12 +38,22 @@ impl Trapezoid {
         ]
     }
 
-    /// Area (as `f64`).
+    /// Height at `x` (top minus bottom), from an exact rational evaluated once in `f64`.
+    fn height(&self, x: i64) -> f64 {
+        let ((a, b), (c, d)) = (self.top, self.bottom);
+        let (dxt, dyt) = ((b.x - a.x) as i128, (b.y - a.y) as i128);
+        let (dxb, dyb) = ((d.x - c.x) as i128, (d.y - c.y) as i128);
+        // Relative to the bottom edge's start to keep the numbers small.
+        let (ox, oy) = (c.x as i128, c.y as i128);
+        let top = ((a.y as i128 - oy) * dxt + (x as i128 - a.x as i128) * dyt) * dxb;
+        let bot = (x as i128 - ox) * dyb * dxt;
+        (top - bot) as f64 / (dxt * dxb) as f64
+    }
+
+    /// Area (as `f64`, computed from exact heights).
     pub fn area(&self) -> f64 {
         let w = (self.x1 - self.x0) as f64;
-        let h0 = y_at(self.top, self.x0) - y_at(self.bottom, self.x0);
-        let h1 = y_at(self.top, self.x1) - y_at(self.bottom, self.x1);
-        w * (h0 + h1) / 2.0
+        w * (self.height(self.x0) + self.height(self.x1)) / 2.0
     }
 }
 

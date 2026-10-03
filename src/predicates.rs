@@ -1,7 +1,9 @@
 //! Exact geometric predicates on integer points.
 //!
 //! All functions assume coordinates within `±MAX_COORD` (2^40); every intermediate value
-//! then fits in `i128`.
+//! then fits in `i128`. These are low-level building blocks: they do not check the range,
+//! and out-of-range input may overflow (a panic in debug builds). The higher-level
+//! operations check ranges before using them.
 
 use crate::geom::{Point, Rect};
 use core::cmp::Ordering;

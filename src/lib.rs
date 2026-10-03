@@ -43,8 +43,11 @@
 //! # Number model
 //!
 //! * Coordinates are `i64` ([`Point`]); every input and output coordinate must lie within
-//!   `±`[`MAX_COORD`] (`2^40`, about 1.1 km in nanometers). Out-of-range input is reported
-//!   as [`Error::CoordinateOutOfRange`], never silently mishandled.
+//!   `±`[`MAX_COORD`] (`2^40`, about 1.1 km in nanometers). Fallible operations report
+//!   out-of-range input as [`Error::CoordinateOutOfRange`]. Infallible queries
+//!   ([`locate`], [`intersects`], [`contains`], [`distance`], [`area2`], ...) check the range
+//!   and return a neutral result for out-of-range input (`Outside`, `false`, `None`, `0`)
+//!   rather than computing with overflowing arithmetic; [`in_range`] tells the cases apart.
 //! * All topological decisions (orientation, intersection, point location, distance
 //!   comparisons) are computed exactly with `i128` arithmetic (and a 384-bit product for
 //!   squared distances). Floating point is used only to construct new vertices (arcs,
@@ -148,8 +151,8 @@ pub use offset::{
     offset_shape, offset_shape_tagged, offset_tagged, offset_tree, opening,
 };
 pub use query::{
-    Geometry, Location, Segment, area2, centroid, contains, intersects, locate, locate_in_polygon,
-    locate_in_ring, ring_area2, ring_winding,
+    Geometry, Location, Segment, area2, centroid, contains, in_range, intersects, locate,
+    locate_in_polygon, locate_in_ring, ring_area2, ring_winding,
 };
 pub use simplify::{simplify_path, simplify_polygon, simplify_polygons};
 pub use triangulate::{Triangulation, triangulate, triangulate_delaunay, triangulate_set};

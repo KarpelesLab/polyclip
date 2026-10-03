@@ -193,7 +193,7 @@ fn containment<A: Geometry + ?Sized, B: Geometry + ?Sized>(outer: &A, inner: &B)
 }
 
 /// Exact minimum distance between two geometries, with a pair of closest points. `None`
-/// when either geometry is empty.
+/// when either geometry is empty or has coordinates outside `±`[`MAX_COORD`](crate::MAX_COORD).
 ///
 /// ```
 /// use polyclip::{distance, Point, Ring};
@@ -206,6 +206,12 @@ fn containment<A: Geometry + ?Sized, B: Geometry + ?Sized>(outer: &A, inner: &B)
 pub fn distance<A: Geometry + ?Sized, B: Geometry + ?Sized>(a: &A, b: &B) -> Option<Closest> {
     let ba = a.bbox()?;
     let bb = b.bbox()?;
+    if ![ba.min, ba.max, bb.min, bb.max]
+        .iter()
+        .all(|p| p.in_range())
+    {
+        return None;
+    }
     let everything = Rect {
         min: Point::new(i64::MIN, i64::MIN),
         max: Point::new(i64::MAX, i64::MAX),
@@ -279,6 +285,8 @@ pub fn distance_sq<A: Geometry + ?Sized, B: Geometry + ?Sized>(a: &A, b: &B) -> 
 }
 
 /// `true` when the distance between the two geometries is strictly less than `d`.
+/// `false` for empty geometries and for coordinates outside
+/// `±`[`MAX_COORD`](crate::MAX_COORD).
 ///
 /// Exact, and much cheaper than [`distance`]: bounding boxes reject first, then only the
 /// segments near the other geometry are compared, stopping at the first pair closer than
@@ -302,6 +310,12 @@ pub fn distance_less_than<A: Geometry + ?Sized, B: Geometry + ?Sized>(
     let (Some(ba), Some(bb)) = (a.bbox(), b.bbox()) else {
         return false;
     };
+    if ![ba.min, ba.max, bb.min, bb.max]
+        .iter()
+        .all(|p| p.in_range())
+    {
+        return false;
+    }
     let d2 = d as u128 * d as u128;
     if rect_gap2(&ba, &bb) >= d2 {
         return false;

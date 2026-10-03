@@ -11,19 +11,23 @@ use crate::query::ring_area2;
 /// Returns a canonical counter-clockwise ring starting at the lexicographically smallest
 /// point, without collinear vertices. Degenerate inputs give degenerate rings: one point for
 /// a single (repeated) point, the two extreme points when all points are collinear, and an
-/// empty ring for no points.
+/// empty ring for no points. Coordinates outside `±`[`MAX_COORD`](crate::MAX_COORD) are an
+/// error.
 ///
 /// ```
 /// use polyclip::{convex_hull, Point, Ring};
 /// let pts = [(0, 0), (4, 0), (2, 1), (4, 4), (0, 4), (2, 2)].map(Point::from);
-/// assert_eq!(convex_hull(pts), Ring::from([(0, 0), (4, 0), (4, 4), (0, 4)]));
+/// assert_eq!(convex_hull(pts).unwrap(), Ring::from([(0, 0), (4, 0), (4, 4), (0, 4)]));
 /// ```
-pub fn convex_hull(points: impl IntoIterator<Item = Point>) -> Ring {
+pub fn convex_hull(points: impl IntoIterator<Item = Point>) -> Result<Ring> {
     let mut p: Vec<Point> = points.into_iter().collect();
+    for &q in &p {
+        check_point(q)?;
+    }
     p.sort_unstable();
     p.dedup();
     if p.len() <= 2 {
-        return Ring(p);
+        return Ok(Ring(p));
     }
     let mut h: Vec<Point> = Vec::with_capacity(p.len() + 1);
     // Lower hull.
@@ -42,11 +46,12 @@ pub fn convex_hull(points: impl IntoIterator<Item = Point>) -> Ring {
         h.push(q);
     }
     h.pop();
-    Ring(h)
+    Ok(Ring(h))
 }
 
-/// Convex hull of every vertex of a geometry (rings, polygons, paths, ...).
-pub fn convex_hull_of<G: crate::query::Geometry + ?Sized>(g: &G) -> Ring {
+/// Convex hull of every vertex of a geometry (rings, polygons, paths, ...). See
+/// [`convex_hull`].
+pub fn convex_hull_of<G: crate::query::Geometry + ?Sized>(g: &G) -> Result<Ring> {
     let mut pts = Vec::new();
     g.visit_segments(&mut |a, b| {
         pts.push(a);
@@ -101,7 +106,7 @@ pub fn minkowski_sum(a: &Polygon, b: &Polygon) -> Result<PolygonSet> {
                 sums.push(add(p, q)?);
             }
         }
-        let h = convex_hull(sums);
+        let h = convex_hull(sums)?;
         return union_all(&h, FillRule::NonZero);
     }
     // Normalize each operand to a clean region first.
@@ -157,10 +162,18 @@ mod tests {
 
     #[test]
     fn hull_degenerate() {
-        assert!(convex_hull(Vec::new()).is_empty());
-        assert_eq!(convex_hull([Point::new(1, 1); 3]).len(), 1);
+        assert!(convex_hull(Vec::new()).unwrap().is_empty());
+        assert_eq!(convex_hull([Point::new(1, 1); 3]).unwrap().len(), 1);
+        assert!(
+            convex_hull([
+                Point::new(i64::MIN, 0),
+                Point::new(i64::MAX, 1),
+                Point::new(0, 5)
+            ])
+            .is_err()
+        );
         assert_eq!(
-            convex_hull([(0, 0), (1, 1), (2, 2)].map(Point::from)),
+            convex_hull([(0, 0), (1, 1), (2, 2)].map(Point::from)).unwrap(),
             Ring::from([(0, 0), (2, 2)])
         );
     }

@@ -8,10 +8,12 @@ use crate::geom::{Path, Point, PointF, PolyTree, Polygon, Rect, Ring};
 use crate::predicates::{on_segment, orient, segments_intersect};
 
 /// Twice the signed area of a ring given as a vertex slice (exact, shoelace formula).
-/// Positive for counter-clockwise rings.
+/// Positive for counter-clockwise rings. Returns 0 for rings with fewer than three vertices
+/// or with coordinates outside `±`[`MAX_COORD`](crate::MAX_COORD) (whose area could not be
+/// computed exactly).
 pub fn ring_area2(pts: &[Point]) -> i128 {
     let n = pts.len();
-    if n < 3 {
+    if n < 3 || !pts.iter().all(|p| p.in_range()) {
         return 0;
     }
     let o = pts[0];
@@ -52,7 +54,13 @@ impl Segment {
 }
 
 /// Winding number of `pts` (a closed ring) around `p`, or `None` when `p` is on the ring.
+///
+/// Queries are exact for coordinates within `±`[`MAX_COORD`](crate::MAX_COORD); if `p` or
+/// the ring lies outside that range the result is `Some(0)` (outside), never a panic.
 pub fn ring_winding(pts: &[Point], p: Point) -> Option<i32> {
+    if !p.in_range() || !pts.iter().all(|q| q.in_range()) {
+        return Some(0);
+    }
     let n = pts.len();
     let mut w = 0i32;
     for i in 0..n {
@@ -152,6 +160,9 @@ impl Geometry for Segment {
         f(self.a, self.b)
     }
     fn locate(&self, p: Point) -> Location {
+        if !(p.in_range() && self.a.in_range() && self.b.in_range()) {
+            return Location::Outside;
+        }
         if on_segment(self.a, self.b, p) {
             Location::OnBoundary
         } else {
@@ -179,6 +190,9 @@ impl Geometry for Path {
         }
     }
     fn locate(&self, p: Point) -> Location {
+        if !p.in_range() || !self.0.iter().all(|q| q.in_range()) {
+            return Location::Outside;
+        }
         let on = if self.0.len() == 1 {
             self.0[0] == p
         } else {
@@ -381,8 +395,21 @@ impl<T: Geometry + ?Sized> Geometry for &T {
     }
 }
 
+/// `true` when every coordinate of `g` lies within `±`[`MAX_COORD`](crate::MAX_COORD)
+/// (vacuously for an empty geometry).
+pub fn in_range<G: Geometry + ?Sized>(g: &G) -> bool {
+    g.bbox()
+        .is_none_or(|b| b.min.in_range() && b.max.in_range())
+}
+
 /// Location of `p` relative to `g`.
+///
+/// Exact for coordinates within `±`[`MAX_COORD`](crate::MAX_COORD); for out-of-range input
+/// the result is [`Location::Outside`] (see [`in_range`]).
 pub fn locate<G: Geometry + ?Sized>(g: &G, p: Point) -> Location {
+    if !p.in_range() || !in_range(g) {
+        return Location::Outside;
+    }
     g.locate(p)
 }
 
@@ -464,6 +491,12 @@ pub fn intersects<A: Geometry + ?Sized, B: Geometry + ?Sized>(a: &A, b: &B) -> b
     let (Some(ba), Some(bb)) = (a.bbox(), b.bbox()) else {
         return false;
     };
+    if ![ba.min, ba.max, bb.min, bb.max]
+        .iter()
+        .all(|p| p.in_range())
+    {
+        return false;
+    }
     if !ba.intersects(&bb) {
         return false;
     }
@@ -511,7 +544,11 @@ pub fn contains<A: Geometry + ?Sized, B: Geometry + ?Sized>(a: &A, b: &B) -> boo
     let Some(ba) = a.bbox() else {
         return false;
     };
-    if !ba.contains_rect(&bb) {
+    if ![ba.min, ba.max, bb.min, bb.max]
+        .iter()
+        .all(|p| p.in_range())
+        || !ba.contains_rect(&bb)
+    {
         return false;
     }
     if !a.is_areal() {
@@ -570,7 +607,7 @@ pub fn contains<A: Geometry + ?Sized, B: Geometry + ?Sized>(a: &A, b: &B) -> boo
 
 /// Twice the signed area of a geometry's region (exact): the sum over its rings.
 pub fn area2<G: Geometry + ?Sized>(g: &G) -> i128 {
-    if !g.is_areal() {
+    if !g.is_areal() || !in_range(g) {
         return 0;
     }
     // Rings are visited edge by edge; the shoelace sum is translation invariant per closed
@@ -583,12 +620,16 @@ pub fn area2<G: Geometry + ?Sized>(g: &G) -> i128 {
 /// Area centroid of a region given as rings (holes clockwise subtract), or `None` when the
 /// area is zero. Computed in `f64` from exact per-edge terms, relative to the first vertex.
 pub fn centroid<G: Geometry + ?Sized>(g: &G) -> Option<PointF> {
-    if !g.is_areal() {
+    if !g.is_areal() || !in_range(g) {
         return None;
     }
-    let o = g.any_point()?;
+    // Exact sums relative to the bounding box corner, rounded only once at the end.
+    let o = g.bbox()?.min;
     let mut a2: i128 = 0;
-    let (mut cx, mut cy) = (0f64, 0f64);
+    let (mut sx, mut sy) = (
+        crate::wide::I256Acc::default(),
+        crate::wide::I256Acc::default(),
+    );
     g.visit_segments(&mut |p, q| {
         let px = (p.x - o.x) as i128;
         let py = (p.y - o.y) as i128;
@@ -596,14 +637,17 @@ pub fn centroid<G: Geometry + ?Sized>(g: &G) -> Option<PointF> {
         let qy = (q.y - o.y) as i128;
         let c = px * qy - qx * py;
         a2 += c;
-        cx += (px + qx) as f64 * c as f64;
-        cy += (py + qy) as f64 * c as f64;
+        sx.add((px + qx) * c);
+        sy.add((py + qy) * c);
     });
     if a2 == 0 {
         return None;
     }
     let d = 3.0 * a2 as f64;
-    Some(PointF::new(o.x as f64 + cx / d, o.y as f64 + cy / d))
+    Some(PointF::new(
+        o.x as f64 + sx.to_f64() / d,
+        o.y as f64 + sy.to_f64() / d,
+    ))
 }
 
 #[cfg(test)]

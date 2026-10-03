@@ -110,3 +110,10 @@ A new crash is a real bug until proven otherwise:
 4. While a bug is open, a target may carry a narrowly scoped guard that skips the
    offending input class, with a comment naming the regression test; remove it with the
    fix.
+
+## Additional targets
+
+| Target | Covers |
+|---|---|
+| `polygon_tools` | `fracture`, `triangulate`/`triangulate_delaunay`, `simplify_polygon(s)`, `trapezoids`, `convex_hull`, `minkowski_sum` (raw input: no panic; canonical input: exact area and validity checks) |
+| `distance` | `distance`, `distance_less_than` on sets, paths, segments and points (symmetry, zero distance iff intersecting, threshold agrees with the full distance, closest points realize it) |

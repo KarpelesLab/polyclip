@@ -124,3 +124,23 @@ fn shape_out_of_range_overflows() {
     );
     assert!(shape.to_polygon(ArcTol::new(1, Side::Outside)).is_err());
 }
+
+/// Found by `fuzz/polygon_tools`: `convex_hull` overflowed on out-of-range points; queries
+/// must not panic on them either.
+#[test]
+fn out_of_range_queries_do_not_panic() {
+    let far = vec![p(i64::MIN + 1, 0), p(i64::MAX, 0), p(0, i64::MAX)];
+    assert!(convex_hull(far.iter().copied()).is_err());
+    let r = Ring(far.clone());
+    assert_eq!(ring_area2(&r), 0);
+    assert_eq!(locate(&r, p(0, 1)), Location::Outside);
+    assert!(!intersects(&r, &r));
+    assert!(!contains(&r, &p(0, 1)));
+    assert!(distance(&r, &p(0, 0)).is_none());
+    assert!(!distance_less_than(&r, &p(0, 0), 10));
+    assert_eq!(area2(&r), 0);
+    assert!(centroid(&r).is_none());
+    assert!(!in_range(&r));
+    let path = Path(far);
+    assert_eq!(locate(&path, p(0, 0)), Location::Outside);
+}

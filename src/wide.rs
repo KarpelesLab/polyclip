@@ -70,6 +70,36 @@ impl PartialOrd for U384 {
     }
 }
 
+/// Signed 256-bit accumulator for exact sums of `i128` terms.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct I256Acc {
+    hi: i128,
+    lo: u128,
+}
+
+impl I256Acc {
+    #[inline]
+    pub fn add(&mut self, v: i128) {
+        let (lo, carry) = self.lo.overflowing_add(v as u128);
+        self.lo = lo;
+        // Sign-extend `v` into the high half and add the carry.
+        self.hi = self
+            .hi
+            .wrapping_add(if v < 0 { -1 } else { 0 })
+            .wrapping_add(carry as i128);
+    }
+
+    /// Value as `f64` (rounded).
+    pub fn to_f64(self) -> f64 {
+        match self.hi {
+            0 => self.lo as f64,
+            // Small negative values: convert the magnitude to avoid cancellation.
+            -1 if self.lo != 0 => -(self.lo.wrapping_neg() as f64),
+            _ => self.hi as f64 * 340282366920938463463374607431768211456.0 + self.lo as f64,
+        }
+    }
+}
+
 /// Compares `a * b` with `c * d` exactly.
 #[inline]
 pub(crate) fn cmp_products(a: u128, b: u128, c: u128, d: u128) -> Ordering {
@@ -94,5 +124,15 @@ mod tests {
         let q = p.mul_small(1 << 100);
         assert!(q > p);
         assert_eq!(U384::from_u128(12345).to_f64(), 12345.0);
+        let mut acc = I256Acc::default();
+        acc.add(i128::MAX);
+        acc.add(i128::MAX);
+        acc.add(-5);
+        acc.add(i128::MIN);
+        // MAX + MAX - 5 + MIN = MAX - 6
+        assert_eq!(acc.to_f64(), (i128::MAX - 6) as f64);
+        let mut neg = I256Acc::default();
+        neg.add(-3);
+        assert_eq!(neg.to_f64(), -3.0);
     }
 }

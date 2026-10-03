@@ -94,3 +94,17 @@ path = "fuzz_targets/validate.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "polygon_tools"
+path = "fuzz_targets/polygon_tools.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "distance"
+path = "fuzz_targets/distance.rs"
+test = false
+doc = false
+bench = false
