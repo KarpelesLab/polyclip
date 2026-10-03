@@ -304,7 +304,7 @@ fn arcs_survive_booleans() {
         (6, Point::new(-1_500_000, 500_000)),
         (8, Point::new(-1_500_000, -500_000)),
     ];
-    let arc_of = |t: u64| centres.iter().find(|c| c.0 == t).map(|c| (c.1, true));
+    let arc_of = |t: u64| centres.iter().find(|c| c.0 == t).map(|c| c.1);
     let slot = Ring::from([
         (-100_000, -2 * MM),
         (100_000, -2 * MM),

@@ -230,11 +230,14 @@ pub(crate) fn reverse_tagged(r: &mut TaggedRing) {
 /// Signed area of a contour including circular segments (f64, approximate).
 fn contour_area(c: &[Curve]) -> f64 {
     let Some(last) = c.last() else { return 0.0 };
-    let mut cur = last.end();
+    let o = last.end();
+    let mut cur = o;
+    // Polygon part exactly (relative to the start point), arc segments in f64.
+    let mut poly: i128 = 0;
     let mut a = 0.0;
     for e in c {
         let end = e.end();
-        a += (cur.x as f64) * (end.y as f64) - (end.x as f64) * (cur.y as f64);
+        poly += crate::predicates::orient(o, cur, end);
         if let Some(g) = arc_geom(cur, e) {
             // Circular segment area between chord and arc: r^2/2 (theta - sin theta),
             // signed by the sweep direction.
@@ -243,7 +246,7 @@ fn contour_area(c: &[Curve]) -> f64 {
         }
         cur = end;
     }
-    a / 2.0
+    (poly as f64 + a) / 2.0
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -577,7 +580,7 @@ fn approx_contour(
 }
 
 /// Rebuilds a curved contour from a tagged ring: maximal runs of consecutive edges whose
-/// tag maps to an arc (`arc_of(tag) = Some((center, ccw))`) become one
+/// tag maps to an arc centre (`arc_of(tag) = Some(center)`) become one
 /// [`Curve::CenterArc`]; every other edge becomes a [`Curve::Line`].
 ///
 /// Use with tags assigned per arc when approximating ([`Shape::to_tagged`]) or offsetting
@@ -593,10 +596,10 @@ fn approx_contour(
 /// use polyclip::{arcs_from_tags, ArcTol, Circle, Curve, Point, Side, TaggedRing};
 /// let c = Circle::new(Point::new(0, 0), 10_000).to_ring(ArcTol::new(5, Side::Nearest)).unwrap();
 /// let tagged = TaggedRing::uniform(c, 7);
-/// let contour = arcs_from_tags(&tagged, &|t| (t == 7).then_some((Point::new(0, 0), true)));
+/// let contour = arcs_from_tags(&tagged, &|t| (t == 7).then_some(Point::new(0, 0)));
 /// assert_eq!(contour.len(), 1); // one full-circle arc
 /// ```
-pub fn arcs_from_tags(ring: &TaggedRing, arc_of: &dyn Fn(u64) -> Option<(Point, bool)>) -> Contour {
+pub fn arcs_from_tags(ring: &TaggedRing, arc_of: &dyn Fn(u64) -> Option<Point>) -> Contour {
     let n = ring.points.len();
     if n == 0 || ring.tags.len() != n {
         return Vec::new();
@@ -617,12 +620,19 @@ pub fn arcs_from_tags(ring: &TaggedRing, arc_of: &dyn Fn(u64) -> Option<(Point, 
                 out.push(Curve::Line(ring.points[(i + 1) % n]));
                 k += 1;
             }
-            Some((center, ccw)) => {
+            Some(center) => {
                 let tag = ring.tags[i];
                 let mut j = k;
+                // Direction from the ring itself: an arc may be traversed backwards (holes,
+                // differences), so sum the turn of the run's edges around the centre.
+                let mut turn: i128 = 0;
                 while j < n && ring.tags[(start + j) % n] == tag {
+                    let a = ring.points[(start + j) % n];
+                    let b = ring.points[(start + j + 1) % n];
+                    turn += crate::predicates::orient(center, a, b);
                     j += 1;
                 }
+                let ccw = turn >= 0;
                 out.push(Curve::CenterArc {
                     center,
                     end: ring.points[(start + j) % n],
