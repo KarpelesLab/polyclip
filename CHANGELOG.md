@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.3](https://github.com/KarpelesLab/polyclip/compare/v0.0.2...v0.0.3) - 2026-10-03
+
+### Fixed
+
+- simplify_polygons no longer depends on polygon order or ring start
+- triangulate polygons sharing part of an edge
+- exact contour orientation for curved shapes; arc direction from the ring in arcs_from_tags
+- range-check every vertex (holes included) in infallible queries
+
+### Other
+
+- un-ignore second adversarial review regressions
+- handle many edges meeting at one vertex without quadratic pair tests
+- second adversarial review
+
 ## [0.0.2](https://github.com/KarpelesLab/polyclip/compare/v0.0.1...v0.0.2) - 2026-10-03
 
 ### Added
