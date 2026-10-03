@@ -51,6 +51,13 @@ pub(crate) fn link_rings(mut edges: Vec<DirEdge>) -> (Vec<RawRing>, Vec<Point>) 
             pinch.push(w[0].from);
         }
     }
+    // First out-edge index of every vertex.
+    let mut first: PointMap = PointMap::with_capacity(n);
+    for (i, e) in edges.iter().enumerate() {
+        if i == 0 || edges[i - 1].from != e.from {
+            first.insert(e.from, i as u32);
+        }
+    }
     let mut used = vec![false; n];
     let mut rings = Vec::new();
     let mut walk: Vec<u32> = Vec::new();
@@ -65,8 +72,12 @@ pub(crate) fn link_rings(mut edges: Vec<DirEdge>) -> (Vec<RawRing>, Vec<Point>) 
             used[cur] = true;
             walk.push(cur as u32);
             let e = edges[cur];
-            let lo = edges.partition_point(|x| x.from < e.to);
-            let hi = lo + edges[lo..].partition_point(|x| x.from == e.to);
+            let Some(lo) = first.get(e.to) else { break };
+            let lo = lo as usize;
+            let mut hi = lo + 1;
+            while hi < n && edges[hi].from == e.to {
+                hi += 1;
+            }
             let next = if hi - lo == 1 {
                 lo
             } else {
@@ -115,6 +126,62 @@ pub(crate) fn link_rings(mut edges: Vec<DirEdge>) -> (Vec<RawRing>, Vec<Point>) 
         }
     }
     (rings, pinch)
+}
+
+/// A minimal open-addressing hash map from points to `u32`, with a fixed multiplicative
+/// hash (lookups only; iteration order never matters, so results stay deterministic).
+pub(crate) struct PointMap {
+    keys: Vec<Point>,
+    vals: Vec<u32>,
+    mask: usize,
+}
+
+impl PointMap {
+    const EMPTY: u32 = u32::MAX;
+
+    pub fn with_capacity(n: usize) -> Self {
+        let cap = (n * 2).next_power_of_two().max(16);
+        PointMap {
+            keys: vec![Point::default(); cap],
+            vals: vec![Self::EMPTY; cap],
+            mask: cap - 1,
+        }
+    }
+
+    #[inline]
+    fn slot(&self, p: Point) -> usize {
+        let h = (p.x as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            ^ (p.y as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
+        ((h ^ (h >> 29)).wrapping_mul(0x1656_67B1_9E37_79F9) >> 20) as usize & self.mask
+    }
+
+    /// Inserts (or overwrites) `p -> v`; `v` must not be `u32::MAX`.
+    pub fn insert(&mut self, p: Point, v: u32) {
+        let mut i = self.slot(p);
+        loop {
+            if self.vals[i] == Self::EMPTY || self.keys[i] == p {
+                self.keys[i] = p;
+                self.vals[i] = v;
+                return;
+            }
+            i = (i + 1) & self.mask;
+        }
+    }
+
+    #[inline]
+    pub fn get(&self, p: Point) -> Option<u32> {
+        let mut i = self.slot(p);
+        loop {
+            let v = self.vals[i];
+            if v == Self::EMPTY {
+                return None;
+            }
+            if self.keys[i] == p {
+                return Some(v);
+            }
+            i = (i + 1) & self.mask;
+        }
+    }
 }
 
 /// Splits a closed walk that may repeat vertices into simple loops.

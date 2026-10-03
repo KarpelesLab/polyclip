@@ -30,3 +30,6 @@ serde = { version = "1", features = ["derive"], optional = true }
 
 [dev-dependencies]
 proptest = { version = "1", default-features = false, features = ["std"] }
+
+[profile.release]
+debug = "line-tables-only"

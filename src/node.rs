@@ -90,8 +90,8 @@ impl Grid {
             .collect();
         let mid = ext.len() / 2;
         let typical = *ext.select_nth_unstable(mid).1;
-        // At most ~4 cells per segment.
-        let s_min = libm::ceil(libm::sqrt(w * h / (4.0 * n as f64 + 16.0)));
+        // At most about one cell per segment.
+        let s_min = libm::ceil(libm::sqrt(w * h / (n as f64 + 16.0)));
         let s = (typical as f64).max(s_min).max(1.0).min(w.max(h));
         let s = s as i64;
         let nx = ((bb.max.x - bb.min.x) / s + 1) as usize;
@@ -242,13 +242,20 @@ fn rounded_crossing(a: Point, b: Point, c: Point, d: Point) -> Point {
 /// Snap-rounds `segs` (each with distinct endpoints). Returns the fragments of every
 /// segment, grouped by segment in input order and ordered from `a` to `b` within a segment.
 pub(crate) fn snap_round(segs: &[(Point, Point)]) -> Vec<Frag> {
-    let n = segs.len();
     let bboxes: Vec<Rect> = segs.iter().map(seg_bbox).collect();
     let grid = Grid::build(segs, &bboxes);
-    let mut order = Vec::new();
+    let (pstart, pix) = hot_pixels(segs, &bboxes, &grid);
+    let (hits, near) = find_hits(segs, &bboxes, &grid, &pstart, &pix);
+    drop((pstart, pix, grid, bboxes));
+    build_frags(segs, &hits, &near)
+}
 
-    // 1. Hot pixels: endpoints and rounded proper crossings, bucketed by cell.
-    let mut hot: Vec<(u32, Point)> = Vec::with_capacity(n * 2);
+/// Hot pixels (endpoints and rounded proper crossings), grouped by cell (CSR), each cell
+/// sorted by `(x, y)` without duplicates.
+#[inline(never)]
+fn hot_pixels(segs: &[(Point, Point)], bboxes: &[Rect], grid: &Grid) -> (Vec<u32>, Vec<Point>) {
+    let mut order = Vec::new();
+    let mut hot: Vec<(u32, Point)> = Vec::with_capacity(segs.len() * 2);
     for s in segs {
         hot.push((grid.cell(s.0) as u32, s.0));
         hot.push((grid.cell(s.1) as u32, s.1));
@@ -258,7 +265,7 @@ pub(crate) fn snap_round(segs: &[(Point, Point)]) -> Vec<Frag> {
         if items.len() < 2 {
             continue;
         }
-        for_each_pair(items, &bboxes, &mut order, |i, j| {
+        for_each_pair(items, bboxes, &mut order, |i, j| {
             let (a, b) = segs[i as usize];
             let (p, q) = segs[j as usize];
             if segments_cross_properly(a, b, p, q) {
@@ -274,28 +281,34 @@ pub(crate) fn snap_round(segs: &[(Point, Point)]) -> Vec<Frag> {
     let (pstart, mut pix) = csr(grid.n_cells(), &hot);
     drop(hot);
     // Sort and dedup within each cell, compacting in place.
-    let mut pstart2 = vec![0u32; grid.n_cells() + 1];
+    let mut out_start = vec![0u32; grid.n_cells() + 1];
     let mut w = 0usize;
     for c in 0..grid.n_cells() {
         let (s0, s1) = (pstart[c] as usize, pstart[c + 1] as usize);
-        let cell = &mut pix[s0..s1];
-        cell.sort_unstable();
-        let mut last: Option<Point> = None;
+        pix[s0..s1].sort_unstable();
         for k in s0..s1 {
             let p = pix[k];
-            if last != Some(p) {
+            if k == s0 || p != pix[k - 1] {
                 pix[w] = p;
                 w += 1;
-                last = Some(p);
             }
         }
-        pstart2[c + 1] = w as u32;
+        out_start[c + 1] = w as u32;
     }
     pix.truncate(w);
-    let pstart = pstart2;
+    (out_start, pix)
+}
 
-    // 2. For each segment, the hot pixels it meets (other than its own endpoints) and the
-    //    hot pixel centres close enough to possibly lie on one of its fragments.
+/// Per segment (CSR), the hot pixels it meets other than its own endpoints, and the hot
+/// pixel centres close enough to possibly lie on one of its fragments.
+#[inline(never)]
+fn find_hits(
+    segs: &[(Point, Point)],
+    bboxes: &[Rect],
+    grid: &Grid,
+    pstart: &[u32],
+    pix: &[Point],
+) -> ((Vec<u32>, Vec<Point>), (Vec<u32>, Vec<Point>)) {
     let mut hits: Vec<(u32, Point)> = Vec::new();
     let mut near: Vec<(u32, Point)> = Vec::new();
     for c in 0..grid.n_cells() {
@@ -306,26 +319,41 @@ pub(crate) fn snap_round(segs: &[(Point, Point)]) -> Vec<Frag> {
         for &si in grid.items(c) {
             let (a, b) = segs[si as usize];
             let bb = &bboxes[si as usize];
-            let from = cp.partition_point(|p| p.x < bb.min.x - 1);
-            let len2 = {
-                let dx = (b.x - a.x) as f64;
-                let dy = (b.y - a.y) as f64;
-                dx * dx + dy * dy
+            let from = if cp.len() > 8 {
+                cp.partition_point(|p| p.x < bb.min.x - 1)
+            } else {
+                0
             };
+            let dx = (b.x - a.x) as f64;
+            let dy = (b.y - a.y) as f64;
+            let len2 = dx * dx + dy * dy;
             for &p in &cp[from..] {
                 if p.x > bb.max.x + 1 {
                     break;
                 }
-                if p.y < bb.min.y - 1 || p.y > bb.max.y + 1 || p == a || p == b {
+                if p.x < bb.min.x - 1
+                    || p.y < bb.min.y - 1
+                    || p.y > bb.max.y + 1
+                    || p == a
+                    || p == b
+                {
                     continue;
                 }
-                // Both meeting the pixel and lying on a fragment require the centre to be
-                // within sqrt(2)/2 of the segment: |orient| <= 0.71 * len (with slack).
-                let o = orient(a, b, p) as f64;
+                // Meeting the pixel, or lying on a fragment, requires the centre to be within
+                // sqrt(2)/2 of the segment's line: |cross| <= 0.71 * len. The float cross
+                // product is accurate to far better than the slack used here.
+                let px = (p.x - a.x) as f64;
+                let py = (p.y - a.y) as f64;
+                let o = dx * py - dy * px;
                 if o * o > 0.55 * len2 {
                     continue;
                 }
-                if segment_pixel_entry(a, b, p).is_some() {
+                // Fast accept: within 1/2 of the line and well inside the segment's span
+                // means the segment crosses the pixel's inscribed disk.
+                let t = dx * px + dy * py;
+                let inside =
+                    o * o < 0.24 * len2 && t > len2.sqrt() * 0.75 && t < len2 - len2.sqrt() * 0.75;
+                if inside || segment_pixel_entry(a, b, p).is_some() {
                     hits.push((si, p));
                 } else {
                     near.push((si, p));
@@ -333,12 +361,19 @@ pub(crate) fn snap_round(segs: &[(Point, Point)]) -> Vec<Frag> {
             }
         }
     }
-    drop(pix);
-    let (hstart, hits) = csr(n, &hits);
-    let (nstart, near) = csr(n, &near);
+    (csr(segs.len(), &hits), csr(segs.len(), &near))
+}
 
-    // 3. Build fragments.
-    let mut out: Vec<Frag> = Vec::with_capacity(n + hits.len() + near.len());
+/// Builds the fragments of every segment from its hot pixels.
+#[inline(never)]
+fn build_frags(
+    segs: &[(Point, Point)],
+    hits: &(Vec<u32>, Vec<Point>),
+    near: &(Vec<u32>, Vec<Point>),
+) -> Vec<Frag> {
+    let (hstart, hits) = (&hits.0, &hits.1);
+    let (nstart, near) = (&near.0, &near.1);
+    let mut out: Vec<Frag> = Vec::with_capacity(segs.len() + hits.len() + near.len());
     let mut poly: Vec<Point> = Vec::new();
     let mut ord: Vec<(i128, Point)> = Vec::new();
     let mut ins: Vec<(usize, i128, Point)> = Vec::new();
