@@ -37,25 +37,28 @@ fn cmp_cw_from(r: Point, a: Point, b: Point) -> Ordering {
     half(a).cmp(&half(b)).then_with(|| cross(a, b).cmp(&0))
 }
 
-/// Links boundary edges into rings. Every vertex must have equal in- and out-degree (true
-/// for the boundary of any region). At vertices of degree > 2 the outgoing edge is chosen
-/// first clockwise from the incoming one (face tracing), and closed walks that still visit a
-/// vertex twice are split there, so every returned ring is simple.
-pub(crate) fn link_rings(mut edges: Vec<DirEdge>) -> (Vec<RawRing>, Vec<Point>) {
-    edges.sort_unstable();
+/// Links boundary edges into rings (as lists of edge indices). Every vertex must have
+/// equal in- and out-degree (true for the boundary of any region). At vertices of degree > 2
+/// the outgoing edge is chosen first clockwise from the incoming one (face tracing), and
+/// closed walks that still visit a vertex twice are split there, so every ring is simple.
+/// Also returns the pinch vertices (out-degree > 1), sorted.
+pub(crate) fn link_rings(edges: &[DirEdge]) -> (Vec<Vec<u32>>, Vec<Point>) {
     let n = edges.len();
+    let mut perm: Vec<u32> = (0..n as u32).collect();
+    perm.sort_unstable_by_key(|&k| edges[k as usize].from);
+    let from = |pos: usize| edges[perm[pos] as usize].from;
     // Pinch vertices: out-degree > 1.
     let mut pinch: Vec<Point> = Vec::new();
-    for w in edges.windows(2) {
-        if w[0].from == w[1].from && pinch.last() != Some(&w[0].from) {
-            pinch.push(w[0].from);
+    for pos in 1..n {
+        if from(pos) == from(pos - 1) && pinch.last() != Some(&from(pos)) {
+            pinch.push(from(pos));
         }
     }
-    // First out-edge index of every vertex.
+    // First position (in `perm`) of every vertex's out-edges.
     let mut first: PointMap = PointMap::with_capacity(n);
-    for (i, e) in edges.iter().enumerate() {
-        if i == 0 || edges[i - 1].from != e.from {
-            first.insert(e.from, i as u32);
+    for pos in 0..n {
+        if pos == 0 || from(pos - 1) != from(pos) {
+            first.insert(from(pos), pos as u32);
         }
     }
     let mut used = vec![false; n];
@@ -75,15 +78,16 @@ pub(crate) fn link_rings(mut edges: Vec<DirEdge>) -> (Vec<RawRing>, Vec<Point>) 
             let Some(lo) = first.get(e.to) else { break };
             let lo = lo as usize;
             let mut hi = lo + 1;
-            while hi < n && edges[hi].from == e.to {
+            while hi < n && from(hi) == e.to {
                 hi += 1;
             }
             let next = if hi - lo == 1 {
-                lo
+                perm[lo] as usize
             } else {
                 let r = sub(e.from, e.to);
                 let mut best: Option<usize> = None;
-                for k in lo..hi {
+                for &k in &perm[lo..hi] {
+                    let k = k as usize;
                     if used[k] && k != start {
                         continue;
                     }
@@ -103,7 +107,7 @@ pub(crate) fn link_rings(mut edges: Vec<DirEdge>) -> (Vec<RawRing>, Vec<Point>) 
                 closed = true;
                 break;
             }
-            if hi == lo || used[next] {
+            if used[next] {
                 break;
             }
             cur = next;
@@ -117,12 +121,9 @@ pub(crate) fn link_rings(mut edges: Vec<DirEdge>) -> (Vec<RawRing>, Vec<Point>) 
                 .iter()
                 .any(|&k| pinch.binary_search(&edges[k as usize].from).is_ok());
         if has_pinch {
-            split_walk(&edges, &walk, &mut rings);
+            split_walk(edges, &walk, &mut rings);
         } else {
-            rings.push(RawRing {
-                pts: walk.iter().map(|&k| edges[k as usize].from).collect(),
-                tags: walk.iter().map(|&k| edges[k as usize].tag).collect(),
-            });
+            rings.push(walk.clone());
         }
     }
     (rings, pinch)
@@ -185,7 +186,7 @@ impl PointMap {
 }
 
 /// Splits a closed walk that may repeat vertices into simple loops.
-fn split_walk(edges: &[DirEdge], walk: &[u32], out: &mut Vec<RawRing>) {
+fn split_walk(edges: &[DirEdge], walk: &[u32], out: &mut Vec<Vec<u32>>) {
     let mut stack: Vec<u32> = Vec::new();
     let mut seen: std::collections::HashMap<Point, usize> = std::collections::HashMap::new();
     for &k in walk {
@@ -195,19 +196,13 @@ fn split_walk(edges: &[DirEdge], walk: &[u32], out: &mut Vec<RawRing>) {
             for &q in &lp {
                 seen.remove(&edges[q as usize].from);
             }
-            out.push(RawRing {
-                pts: lp.iter().map(|&q| edges[q as usize].from).collect(),
-                tags: lp.iter().map(|&q| edges[q as usize].tag).collect(),
-            });
+            out.push(lp);
         }
         seen.insert(p, stack.len());
         stack.push(k);
     }
     if !stack.is_empty() {
-        out.push(RawRing {
-            pts: stack.iter().map(|&q| edges[q as usize].from).collect(),
-            tags: stack.iter().map(|&q| edges[q as usize].tag).collect(),
-        });
+        out.push(stack);
     }
 }
 
@@ -261,81 +256,126 @@ pub(crate) fn rotate_to_min(r: &mut RawRing) {
     }
 }
 
-/// Builds the canonical nesting tree from simple, pairwise non-crossing rings that are
-/// oriented with the interior on their left (outer rings counter-clockwise, holes clockwise).
-pub(crate) fn build_tree(mut rings: Vec<RawRing>) -> PolyTree {
-    for r in rings.iter_mut() {
-        rotate_to_min(r);
-    }
-    let m = rings.len();
-    let is_hole: Vec<bool> = rings.iter().map(|r| ring_area2(&r.pts) < 0).collect();
-
-    // Sweep edges: (lo, hi), ring id, material above, query flag.
-    struct E {
-        lo: Point,
-        hi: Point,
-        ring: u32,
-        inside_above: bool,
-        query: bool,
-    }
-    let mut es: Vec<E> = Vec::with_capacity(rings.iter().map(|r| r.pts.len()).sum());
+/// Parent of every ring in the nesting tree. `edges` must be in sweep order (as produced
+/// by the arrangement), `rings` simple, pairwise non-crossing and oriented with the interior
+/// on their left.
+fn nesting(edges: &[DirEdge], rings: &[Vec<u32>], is_hole: &[bool]) -> Vec<Option<u32>> {
+    let n = edges.len();
+    const NONE: u32 = u32::MAX;
+    let mut ring_of = vec![NONE; n];
+    let mut query = vec![false; n];
     for (ri, r) in rings.iter().enumerate() {
-        let n = r.pts.len();
-        let v = r.pts[0];
-        // The lower of the two edges at the minimum vertex is the query edge.
-        let d_next = sub(r.pts[1 % n], v);
-        let d_prev = sub(r.pts[n - 1], v);
-        let next_is_lower = cmp_dir_halfplane(d_next, d_prev) == Ordering::Less;
-        for i in 0..n {
-            let a = r.pts[i];
-            let b = r.pts[(i + 1) % n];
-            let (lo, hi) = if a < b { (a, b) } else { (b, a) };
-            let query = (i == 0 && next_is_lower) || (i == n - 1 && !next_is_lower);
-            es.push(E {
-                lo,
-                hi,
-                ring: ri as u32,
-                inside_above: a < b,
-                query,
-            });
+        for &k in r {
+            ring_of[k as usize] = ri as u32;
         }
+        // At the ring's smallest vertex, the lower of its two edges is the query edge.
+        let m = r.len();
+        let (i, _) = r
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, k)| edges[**k as usize].from)
+            .unwrap();
+        let out_e = r[i] as usize;
+        let in_e = r[(i + m - 1) % m] as usize;
+        let v = edges[out_e].from;
+        let d_out = sub(edges[out_e].to, v);
+        let d_in = sub(edges[in_e].from, v);
+        let q = if cmp_dir_halfplane(d_out, d_in) == Ordering::Less {
+            out_e
+        } else {
+            in_e
+        };
+        query[q] = true;
     }
-    es.sort_unstable_by(|a, b| cmp_sweep_edges((a.lo, a.hi), (b.lo, b.hi)));
-    let segs: Vec<(Point, Point)> = es.iter().map(|e| (e.lo, e.hi)).collect();
-    let mut parent: Vec<Option<u32>> = vec![None; m];
+    let segs: Vec<(Point, Point)> = edges
+        .iter()
+        .map(|e| {
+            if e.from < e.to {
+                (e.from, e.to)
+            } else {
+                (e.to, e.from)
+            }
+        })
+        .collect();
+    debug_assert!(
+        segs.windows(2)
+            .all(|w| cmp_sweep_edges(w[0], w[1]) != Ordering::Greater)
+    );
+    let mut parent: Vec<Option<u32>> = vec![None; rings.len()];
     sweep(&segs, |e, below| {
-        let e = &es[e as usize];
-        if !e.query {
+        let e = e as usize;
+        if !query[e] || ring_of[e] == NONE {
             return;
         }
-        let r = e.ring as usize;
+        let r = ring_of[e] as usize;
         parent[r] = match below {
             None => None,
             Some(b) => {
-                let b = &es[b as usize];
-                let s = b.ring as usize;
-                if b.inside_above {
-                    // Material between: r is a hole of the polygon owning s.
-                    debug_assert!(is_hole[r]);
-                    if is_hole[s] {
-                        parent[s]
-                    } else {
-                        Some(s as u32)
-                    }
+                let s = ring_of[b as usize];
+                if s == NONE {
+                    None
                 } else {
-                    // Exterior (or hole space) between.
-                    debug_assert!(!is_hole[r]);
-                    if is_hole[s] {
-                        Some(s as u32)
+                    let s = s as usize;
+                    let eb = &edges[b as usize];
+                    if eb.from < eb.to {
+                        // Material above `b`: r is a hole of the polygon owning s.
+                        debug_assert!(is_hole[r]);
+                        if is_hole[s] {
+                            parent[s]
+                        } else {
+                            Some(s as u32)
+                        }
                     } else {
-                        parent[s]
+                        // Exterior (or hole space) above `b`.
+                        debug_assert!(!is_hole[r]);
+                        if is_hole[s] {
+                            Some(s as u32)
+                        } else {
+                            parent[s]
+                        }
                     }
                 }
             }
         };
     });
+    parent
+}
 
-    // Canonical order: children sorted by ring vertex sequence; nodes numbered depth-first.
+/// Full pipeline from boundary edges (in sweep order) to a canonical tree.
+pub(crate) fn assemble(edges: Vec<DirEdge>, keep_collinear: bool) -> PolyTree {
+    let (rings_idx, pinch) = link_rings(&edges);
+    let pts_of =
+        |r: &Vec<u32>| -> Vec<Point> { r.iter().map(|&k| edges[k as usize].from).collect() };
+    // Degenerate loops cannot occur for valid arrangements; drop them defensively.
+    let rings_idx: Vec<Vec<u32>> = rings_idx
+        .into_iter()
+        .filter(|r| r.len() >= 3 && ring_area2(&pts_of(r)) != 0)
+        .collect();
+    let is_hole: Vec<bool> = rings_idx
+        .iter()
+        .map(|r| ring_area2(&pts_of(r)) < 0)
+        .collect();
+    let parent = nesting(&edges, &rings_idx, &is_hole);
+    let mut rings: Vec<RawRing> = rings_idx
+        .iter()
+        .map(|r| RawRing {
+            pts: pts_of(r),
+            tags: r.iter().map(|&k| edges[k as usize].tag).collect(),
+        })
+        .collect();
+    drop(rings_idx);
+    for r in rings.iter_mut() {
+        if !keep_collinear {
+            remove_collinear(r, &pinch);
+        }
+        rotate_to_min(r);
+    }
+    canonical_tree(rings, &is_hole, &parent)
+}
+
+/// Orders the rings canonically (children by vertex sequence, depth-first numbering).
+fn canonical_tree(rings: Vec<RawRing>, is_hole: &[bool], parent: &[Option<u32>]) -> PolyTree {
+    let m = rings.len();
     let mut children: Vec<Vec<u32>> = vec![Vec::new(); m];
     let mut roots: Vec<u32> = Vec::new();
     for (r, par) in parent.iter().enumerate() {
@@ -381,16 +421,4 @@ pub(crate) fn build_tree(mut rings: Vec<RawRing>) -> PolyTree {
         nodes,
         roots: roots.iter().map(|&r| new_id[r as usize]).collect(),
     }
-}
-
-/// Full pipeline from boundary edges to a canonical tree.
-pub(crate) fn assemble(edges: Vec<DirEdge>, keep_collinear: bool) -> PolyTree {
-    let (mut rings, pinch) = link_rings(edges);
-    if !keep_collinear {
-        for r in rings.iter_mut() {
-            remove_collinear(r, &pinch);
-        }
-    }
-    rings.retain(|r| r.pts.len() >= 3 && ring_area2(&r.pts) != 0);
-    build_tree(rings)
 }

@@ -67,6 +67,57 @@ fn main() {
         );
         return;
     }
+    if std::env::args().any(|a| a == "offset") {
+        let big = circle(0, 0, 50_000_000.0, 10_000);
+        // A non-convex star as well.
+        let star: Ring = (0..10_000)
+            .map(|k| {
+                let a = 2.0 * std::f64::consts::PI * k as f64 / 10_000.0;
+                let r = if k % 2 == 0 {
+                    50_000_000.0
+                } else {
+                    45_000_000.0
+                };
+                Point::new((r * a.cos()).round() as i64, (r * a.sin()).round() as i64)
+            })
+            .collect();
+        let only_circle = std::env::args().any(|a| a == "circle");
+        for (name, p) in [("circle", &big), ("star", &star)] {
+            if only_circle && name == "star" {
+                continue;
+            }
+            let t = Instant::now();
+            for _ in 0..20 {
+                std::hint::black_box(
+                    offset(p, 100_000, Join::Round, ArcTol::new(1000, Side::Outside)).unwrap(),
+                );
+            }
+            println!("offset {name} x20: {:?}", t.elapsed() / 20);
+            let t = Instant::now();
+            for _ in 0..20 {
+                std::hint::black_box(union_all(p, FillRule::NonZero).unwrap());
+            }
+            println!("  normalize only: {:?}", t.elapsed() / 20);
+        }
+        return;
+    }
+    if std::env::args().any(|a| a == "circles") {
+        let mut s = 42u64;
+        let circles: Vec<Ring> = (0..50_000)
+            .map(|_| {
+                circle(
+                    (lcg(&mut s) % 100_000_000) as i64,
+                    (lcg(&mut s) % 100_000_000) as i64,
+                    1_000_000.0,
+                    64,
+                )
+            })
+            .collect();
+        let t = Instant::now();
+        let u = union_all(&circles, FillRule::NonZero).unwrap();
+        println!("union 50k circles: {:?} -> {}", t.elapsed(), u.len());
+        return;
+    }
     if std::env::args().any(|a| a == "zone") {
         let mut s = 42u64;
         let zone = Ring::from([
