@@ -22,19 +22,9 @@ fuzz_target!(|data: &[u8]| {
             .flat_map(|p| p.iter())
             .chain(ring_points(&clip)),
     );
-    // Known bug (tests/fuzz_regressions.rs `clip_paths_single_vertex_out_of_range`): a
-    // single-vertex path is not range-checked. Remove this once fixed.
-    let only_lone_oor = all_in_range(
-        paths
-            .iter()
-            .filter(|p| p.len() >= 2)
-            .flat_map(|p| p.iter())
-            .chain(ring_points(&clip)),
-    );
     let r = match (clip_paths(&paths, &clip, rule), in_range) {
         (Ok(r), true) => r,
         (Err(_), false) => return,
-        (Ok(_), false) if only_lone_oor => return,
         (Ok(_), false) => panic!("out-of-range input accepted"),
         (Err(e), true) => panic!("in-range input rejected: {e:?}"),
     };

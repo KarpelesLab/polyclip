@@ -9,7 +9,7 @@
 
 use libfuzzer_sys::fuzz_target;
 use polyclip::*;
-use polyclip_fuzz::{Gen, all_in_range, perimeter, ring_points};
+use polyclip_fuzz::{Gen, all_in_range, ring_points};
 
 fuzz_target!(|data: &[u8]| {
     let mut g = Gen::new(data);
@@ -48,22 +48,14 @@ fuzz_target!(|data: &[u8]| {
     if ra == rb && !keep {
         assert_eq!(boolean(op, &a, &b, ra).expect("boolean()"), out);
     }
-    // Re-normalizing canonical output (any rule: its windings are 0/1) stays canonical
-    // and keeps the area up to snap-rounding slack. It is *not* always the identity:
-    // standard snap rounding is not idempotent (an output edge may pass through the unit
-    // pixel of another output vertex and get re-routed there), see
-    // tests/fuzz_regressions.rs `canonical_output_not_fixed_point`.
+    // Re-normalizing canonical output (any rule: its windings are 0/1) is the identity:
+    // edges that no rounding moves are left exactly in place.
     if !keep {
         let rule = match g.fill_rule() {
             FillRule::Negative => FillRule::Positive,
             r => r,
         };
         let again = union_all(&out, rule).expect("re-normalize");
-        if let Err(e) = check_canonical(&again, true) {
-            panic!("re-normalized output not canonical: {e:?}");
-        }
-        let slack = 2.0 * perimeter(&out) + 4.0;
-        let diff = (area2(&again) - area2(&out)).unsigned_abs() as f64;
-        assert!(diff <= slack, "re-normalizing moved area by {diff}/2");
+        assert_eq!(again, out, "re-normalizing canonical output changed it");
     }
 });

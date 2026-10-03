@@ -16,7 +16,6 @@ fn p(x: i64, y: i64) -> Point {
 /// is fine. In release builds the assertion is compiled out; see the companion check
 /// below for whether the output is still valid there.
 #[test]
-#[ignore = "open bug: snap-rounded arrangement not fully noded (sweep debug_assert)"]
 fn union_square_and_self_overlapping_ring_non_noded() {
     let a = vec![Ring(vec![p(3, 1), p(3, 0), p(2, 0), p(2, 1)])];
     let b = vec![Ring(vec![p(3, 1), p(1, 3), p(1, 1), p(1, 5), p(0, 5)])];
@@ -36,7 +35,6 @@ fn union_square_and_self_overlapping_ring_non_noded() {
 /// morphological closing of a 1x2 rectangle by 1 unit (found by `fuzz/offset`; the
 /// `offset_paths` and `arc` targets hit it too).
 #[test]
-#[ignore = "open bug: snap-rounded arrangement not fully noded (sweep debug_assert)"]
 fn closing_small_rectangle_non_noded() {
     let r = vec![Ring(vec![p(2, 1), p(2, 3), p(1, 3), p(1, 1)])];
     let out = closing(&r, 1, ArcTol::new(9, Side::Outside)).unwrap();
@@ -45,7 +43,6 @@ fn closing_small_rectangle_non_noded() {
 
 /// Found by `fuzz/offset_paths`: same assertion from a mitered closed stroke.
 #[test]
-#[ignore = "open bug: snap-rounded arrangement not fully noded (sweep debug_assert)"]
 fn joined_path_offset_non_noded() {
     let paths = vec![Path(vec![p(3, 3), p(0, 0), p(1, 3), p(1, 2)])];
     let out = offset_paths(
@@ -67,7 +64,6 @@ fn joined_path_offset_non_noded() {
 /// Standard snap rounding is not idempotent; iterated snap rounding (or a final
 /// "no edge through a foreign hot pixel" pass) would make it so.
 #[test]
-#[ignore = "design question: snap-rounded output is not idempotent under union_all"]
 fn canonical_output_not_fixed_point() {
     let a = vec![Ring(vec![
         p(3, 1),
@@ -88,7 +84,6 @@ fn canonical_output_not_fixed_point() {
 /// (the range check only looks at vertices of non-degenerate edges), where every other
 /// operation returns `Error::CoordinateOutOfRange`.
 #[test]
-#[ignore = "open bug: clip_paths accepts an out-of-range single-vertex path"]
 fn clip_paths_single_vertex_out_of_range() {
     let paths = vec![Path(vec![p(MAX_COORD + 1, MAX_COORD + 1)])];
     let clip: Vec<Ring> = vec![];
@@ -101,7 +96,6 @@ fn clip_paths_single_vertex_out_of_range() {
 /// Found by `fuzz/offset`: `opening` / `closing` compute `-d.abs()` before validating
 /// `d`, which overflows (panics in debug builds) for `d == i64::MIN`.
 #[test]
-#[ignore = "open bug: opening/closing overflow on i64::MIN"]
 fn opening_closing_i64_min() {
     let r: Vec<Ring> = vec![];
     let tol = ArcTol::new(1, Side::Outside);
@@ -114,7 +108,6 @@ fn opening_closing_i64_min() {
 /// (`attempt to subtract with overflow` in `predicates::orient`) instead of returning
 /// `Error::CoordinateOutOfRange`.
 #[test]
-#[ignore = "open bug: Shape::to_polygon overflows on out-of-range points"]
 fn shape_out_of_range_overflows() {
     let m = MAX_COORD + 1;
     let shape = Shape::new(

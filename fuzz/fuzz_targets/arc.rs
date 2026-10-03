@@ -95,11 +95,6 @@ fuzz_target!(|data: &[u8]| {
         let shape = Shape::new(outer, holes);
         let tol = g.arc_tol_for(span(&pts));
         polyclip_fuzz::dump("(shape, tol)", &(&shape, tol));
-        // Known bug (tests/fuzz_regressions.rs `shape_out_of_range_overflows`): the contour
-        // orientation overflows before the range check. Remove this guard once fixed.
-        if !all_in_range(pts.iter()) {
-            return;
-        }
         let poly = match shape.to_polygon(tol) {
             Ok(p) => p,
             Err(_) => return,

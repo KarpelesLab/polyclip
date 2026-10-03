@@ -453,15 +453,21 @@ pub fn offset_shape_tagged(
 /// part narrower than `2 * d` (minimum-width enforcement for copper zones) while leaving
 /// wide parts essentially unchanged (convex corners get rounded with radius `d`).
 pub fn opening(input: &(impl RingSource + ?Sized), d: i64, tol: ArcTol) -> Result<PolygonSet> {
-    let shrunk = offset(input, -d.abs(), Join::Round, tol)?;
-    offset(&shrunk, d.abs(), Join::Round, tol)
+    let d = d
+        .checked_abs()
+        .ok_or(Error::InvalidParameter("offset delta too large"))?;
+    let shrunk = offset(input, -d, Join::Round, tol)?;
+    offset(&shrunk, d, Join::Round, tol)
 }
 
 /// Morphological closing: grow by `d`, then shrink by `d`, with round joins. Fills gaps and
 /// notches narrower than `2 * d`.
 pub fn closing(input: &(impl RingSource + ?Sized), d: i64, tol: ArcTol) -> Result<PolygonSet> {
-    let grown = offset(input, d.abs(), Join::Round, tol)?;
-    offset(&grown, -d.abs(), Join::Round, tol)
+    let d = d
+        .checked_abs()
+        .ok_or(Error::InvalidParameter("offset delta too large"))?;
+    let grown = offset(input, d, Join::Round, tol)?;
+    offset(&grown, -d, Join::Round, tol)
 }
 
 /// Offsets open paths with edge tags (see [`offset_tagged`] for the tagging rules; end caps

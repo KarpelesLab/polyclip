@@ -25,11 +25,6 @@ fuzz_target!(|data: &[u8]| {
     );
     let in_range = all_in_range(ring_points(&rings));
 
-    // Known bug (tests/fuzz_regressions.rs `opening_closing_i64_min`): opening/closing
-    // negate `d` before validating it. Remove this guard once fixed.
-    if mode < 2 && delta == i64::MIN {
-        return;
-    }
     let res = match mode {
         0 => opening(&rings, delta, tol),
         1 => closing(&rings, delta, tol),

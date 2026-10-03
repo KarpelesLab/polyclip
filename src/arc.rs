@@ -185,6 +185,15 @@ impl Shape {
         tol: ArcTol,
         tag: &dyn Fn(usize, usize) -> u64,
     ) -> Result<Vec<TaggedRing>> {
+        // Range-check everything first: the orientation below uses exact arithmetic.
+        for c in core::iter::once(&self.contour).chain(self.holes.iter()) {
+            for e in c {
+                crate::error::check_point(e.end())?;
+                if let Curve::Arc { mid: q, .. } | Curve::CenterArc { center: q, .. } = e {
+                    crate::error::check_point(*q)?;
+                }
+            }
+        }
         let mut out = Vec::with_capacity(1 + self.holes.len());
         for (ci, c) in core::iter::once(&self.contour)
             .chain(self.holes.iter())

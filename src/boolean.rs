@@ -2,7 +2,7 @@
 
 use crate::arrangement::{Arrangement, InEdge, Noding};
 use crate::assemble::{DirEdge, assemble};
-use crate::error::{Error, Result, check_point};
+use crate::error::{Error, Result};
 use crate::geom::{
     Path, Point, PolyTree, Polygon, PolygonSet, Ring, TaggedPath, TaggedPolygon, TaggedRing,
 };
@@ -455,14 +455,12 @@ pub fn clip_paths(
     let mut err = None;
     paths.visit_paths(&mut |pts, tags| {
         path_starts.push(edges.len());
+        if err.is_none()
+            && let Some(&p) = pts.iter().find(|p| !p.in_range())
+        {
+            err = Some(Error::CoordinateOutOfRange(p));
+        }
         for (i, w) in pts.windows(2).enumerate() {
-            for p in w {
-                if err.is_none()
-                    && let Err(e) = check_point(*p)
-                {
-                    err = Some(e);
-                }
-            }
             if w[0] != w[1] {
                 let tag = tags.and_then(|t| t.get(i)).copied().unwrap_or(0);
                 edges.push(InEdge {
