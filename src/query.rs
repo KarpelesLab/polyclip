@@ -107,6 +107,13 @@ pub trait Geometry {
     fn locate(&self, p: Point) -> Location;
     /// Some vertex of the geometry, if not empty.
     fn any_point(&self) -> Option<Point>;
+    /// Calls `f` with one vertex of every connected component (every polygon of a set,
+    /// every outer ring of a tree). Single-component geometries use [`any_point`](Self::any_point).
+    fn component_points(&self, f: &mut dyn FnMut(Point)) {
+        if let Some(p) = self.any_point() {
+            f(p)
+        }
+    }
 }
 
 impl Geometry for Point {
@@ -282,6 +289,11 @@ impl Geometry for [Polygon] {
     fn any_point(&self) -> Option<Point> {
         self.iter().find_map(|p| p.any_point())
     }
+    fn component_points(&self, f: &mut dyn FnMut(Point)) {
+        for p in self {
+            p.component_points(f)
+        }
+    }
 }
 
 impl Geometry for Vec<Polygon> {
@@ -299,6 +311,9 @@ impl Geometry for Vec<Polygon> {
     }
     fn any_point(&self) -> Option<Point> {
         self.as_slice().any_point()
+    }
+    fn component_points(&self, f: &mut dyn FnMut(Point)) {
+        self.as_slice().component_points(f)
     }
 }
 
@@ -336,6 +351,13 @@ impl Geometry for PolyTree {
     fn any_point(&self) -> Option<Point> {
         self.nodes.first().and_then(|n| n.ring.0.first().copied())
     }
+    fn component_points(&self, f: &mut dyn FnMut(Point)) {
+        for n in self.nodes.iter().filter(|n| !n.is_hole) {
+            if let Some(&p) = n.ring.0.first() {
+                f(p)
+            }
+        }
+    }
 }
 
 impl<T: Geometry + ?Sized> Geometry for &T {
@@ -353,6 +375,9 @@ impl<T: Geometry + ?Sized> Geometry for &T {
     }
     fn any_point(&self) -> Option<Point> {
         (**self).any_point()
+    }
+    fn component_points(&self, f: &mut dyn FnMut(Point)) {
+        (**self).component_points(f)
     }
 }
 
@@ -449,21 +474,28 @@ pub fn intersects<A: Geometry + ?Sized, B: Geometry + ?Sized>(a: &A, b: &B) -> b
     }) {
         return true;
     }
-    if b.is_areal() {
-        if let Some(p) = a.any_point() {
-            if b.locate(p) != Location::Outside {
-                return true;
-            }
-        }
+    // Boundaries are disjoint: each connected component lies entirely inside or outside the
+    // other geometry, so one point per component decides.
+    any_component_inside(b, a).is_some() || any_component_inside(a, b).is_some()
+}
+
+/// `true` when some connected component of `inner` has its representative point in the
+/// closed region `outer` (always `false` for a non-areal `outer`).
+pub(crate) fn any_component_inside<A: Geometry + ?Sized, B: Geometry + ?Sized>(
+    outer: &A,
+    inner: &B,
+) -> Option<Point> {
+    if !outer.is_areal() {
+        return None;
     }
-    if a.is_areal() {
-        if let Some(p) = b.any_point() {
-            if a.locate(p) != Location::Outside {
-                return true;
-            }
+    let ob = outer.bbox()?;
+    let mut found = None;
+    inner.component_points(&mut |p| {
+        if found.is_none() && ob.contains_point(p) && outer.locate(p) != Location::Outside {
+            found = Some(p);
         }
-    }
-    false
+    });
+    found
 }
 
 /// `true` when every point of `b` belongs to `a` (closed sets), exactly.

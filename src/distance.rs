@@ -7,7 +7,7 @@
 
 use crate::geom::{Point, PointF, Rect};
 use crate::predicates::{cross, crossing_f64, dist2, dot, on_segment, segments_intersect, sub};
-use crate::query::{Geometry, Location, any_pair, collect_segments};
+use crate::query::{Geometry, any_pair, collect_segments};
 use crate::wide::{U384, cmp_products};
 use core::cmp::Ordering;
 
@@ -188,16 +188,8 @@ fn rect_gap2(a: &Rect, b: &Rect) -> u128 {
     dx * dx + dy * dy
 }
 
-/// Point of `inner` lying in areal `outer`, if `inner`'s first point is not outside it.
 fn containment<A: Geometry + ?Sized, B: Geometry + ?Sized>(outer: &A, inner: &B) -> Option<Point> {
-    if !outer.is_areal() {
-        return None;
-    }
-    let p = inner.any_point()?;
-    if !outer.bbox()?.contains_point(p) {
-        return None;
-    }
-    (outer.locate(p) != Location::Outside).then_some(p)
+    crate::query::any_component_inside(outer, inner)
 }
 
 /// Exact minimum distance between two geometries, with a pair of closest points. `None`

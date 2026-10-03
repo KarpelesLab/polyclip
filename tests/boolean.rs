@@ -260,3 +260,28 @@ fn engine_reuse() {
     e.add_subject(&sq(0, 0, 10, 10), FillRule::NonZero);
     assert_eq!(e.execute().unwrap(), a);
 }
+
+#[test]
+fn multi_component_containment() {
+    // Regression: the second polygon of a set lies inside `a`; the first does not.
+    let a = Ring::from([(-969, 876), (-728, -145), (-323, -400), (0, 284)]);
+    let set = vec![
+        Polygon::from(Ring::from([(-1189, 0), (-1188, -1), (-1188, 0)])),
+        Polygon::from(Ring::from([(-950, 864), (-896, 635), (-391, 0)])),
+    ];
+    assert!(intersects(&a, &set));
+    assert!(intersects(&set, &a));
+    assert!(distance(&a, &set).unwrap().sq.is_zero());
+    assert!(distance_less_than(&set, &a, 1));
+}
+
+#[test]
+fn valid_input_unchanged() {
+    // Regression: a segment passing exactly through the corner of another vertex's pixel
+    // must not be snapped when nothing crosses (union of a valid polygon is the identity).
+    let r = Ring::from([(-12, 1), (-11, 0), (-11, 1), (0, 1), (0, 8), (-12, 2)]);
+    assert_eq!(
+        union_all(&r, FillRule::NonZero).unwrap(),
+        vec![Polygon::from(r)]
+    );
+}
