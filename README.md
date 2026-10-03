@@ -20,6 +20,8 @@ output), usable as a standalone crate.
 - **Offsetting**: polygons with holes (round, miter, bevel, square joins), open paths
   (round, square, butt caps; closed loops), opening/closing for minimum-width enforcement,
   curved shapes.
+- **Incremental zone refill**: `ZoneFill` adds/removes/moves obstacles by id and updates
+  the fill in well under a millisecond, with results identical to a full recompute.
 - **Curved booleans**: `curved_boolean` on `Shape`s keeps arcs as arcs (for Gerber/IPC-2581
   output) with a guaranteed error bound and side.
 - **Arcs**: lines, three-point arcs, centre arcs and circles approximated within a
@@ -100,7 +102,6 @@ behaviour.
   deviation bound and side guarantee, but it is built on approximation plus
   reconstruction, not an exact line/arc arrangement: near tangencies and crowded spots
   short polyline pieces remain.
-- There is no incremental engine yet: refilling a zone recomputes it fully.
 
 ## Feature flags
 
