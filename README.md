@@ -69,19 +69,39 @@ fn main() -> polyclip::Result<()> {
 
 ## Performance
 
-Single thread, Apple Silicon laptop, release build (see `examples/perf.rs`):
+Single thread unless noted, Apple Silicon laptop, release build (`cargo bench`,
+`examples/perf.rs`, and the Clipper2 comparison in `oracle/`):
 
-| Workload | polyclip | Clipper2 (C++) |
-|---|---|---|
-| zone 100 mm × 100 mm − 5 000 inflated obstacles | ~50–60 ms | ~41 ms |
-| union of 50 000 heavily overlapping 64-vertex circles | ~2.5 s | ~157 s |
-| offset of a 10 000-vertex polygon (round joins) | ~10 ms | — |
-| `distance_less_than`, two 64-vertex polygons (average incl. bbox rejection) | ~80 ns | — |
-| fracture of the zone result (3 672 holes) | ~13 ms | — |
+| Workload | polyclip | with `rayon` | Clipper2 (C++) |
+|---|---|---|---|
+| zone 100 mm × 100 mm − 5 000 inflated obstacles | ~55–62 ms | ~48 ms | ~41 ms |
+| union of 50 000 heavily overlapping 64-vertex circles | ~3.4 s | ~2.4 s | ~157 s |
+| offset of a 10 000-vertex polygon (round joins), convex | ~9.4 ms | | ~0.9 ms |
+| offset of a 10 000-vertex wavy star | ~21 ms | | |
+| `distance_less_than`, 64-vertex polygons (average incl. bbox rejection) | ~80 ns | | |
+| fracture of the zone result (3 672 holes) | ~10 ms | | |
+| triangulation of the zone result | ~33 ms | | |
+| union of 50 000 stacked slots / diagonal slots (long dense parallel edges) | ~76 / ~99 ms | | |
+
+The noder adapts its spatial index to the data (uniform grid or k-d tree, sweeps along
+the thinnest of four directions), so long, dense or parallel edges do not degrade into
+quadratic behaviour.
 
 ## Feature flags
 
 - `serde`: `Serialize`/`Deserialize` for all data types.
+- `rayon`: parallelize the heavy phases of boolean operations. Output is identical for any
+  number of threads.
+
+## Verification
+
+- Property tests (`proptest`) for boolean identities, validity and canonical form,
+  idempotence, offsets, distances, fracture, simplification, triangulation and
+  decomposition.
+- Differential testing against Clipper2 (as an oracle only) in the separate `oracle/`
+  crate.
+- Fuzzing of every public operation with `cargo-fuzz` (`fuzz/`), run weekly in CI.
+- Criterion benchmarks (`benches/`).
 
 ## MSRV
 
