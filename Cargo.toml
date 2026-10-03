@@ -23,12 +23,14 @@ all-features = true
 [features]
 default = []
 serde = ["dep:serde"]
+rayon = ["dep:rayon"]
 
 [dependencies]
 # Pure-Rust libm: identical transcendental results on every platform, which
 # keeps arc approximation bit-for-bit deterministic.
 libm = "0.2"
 serde = { version = "1", features = ["derive"], optional = true }
+rayon = { version = "1", optional = true }
 
 [dev-dependencies]
 proptest = { version = "1", default-features = false, features = ["std"] }

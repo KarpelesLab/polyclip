@@ -20,6 +20,13 @@ fn circle(cx: i64, cy: i64, r: f64, n: usize) -> Ring {
         .collect()
 }
 
+fn checksum(ps: &PolygonSet) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    ps.hash(&mut h);
+    h.finish()
+}
+
 fn main() {
     if std::env::args().any(|a| a == "wide") {
         if std::env::var("PITCH").is_ok() {
@@ -115,7 +122,12 @@ fn main() {
             .collect();
         let t = Instant::now();
         let u = union_all(&circles, FillRule::NonZero).unwrap();
-        println!("union 50k circles: {:?} -> {}", t.elapsed(), u.len());
+        println!(
+            "union 50k circles: {:?} -> {} (checksum {:x})",
+            t.elapsed(),
+            u.len(),
+            checksum(&u)
+        );
         return;
     }
     if std::env::args().any(|a| a == "zone") {
@@ -137,10 +149,17 @@ fn main() {
             })
             .collect();
         let t = Instant::now();
+        let mut d = Vec::new();
         for _ in 0..20 {
-            std::hint::black_box(boolean(Op::Difference, &zone, &obst, FillRule::NonZero).unwrap());
+            d = std::hint::black_box(
+                boolean(Op::Difference, &zone, &obst, FillRule::NonZero).unwrap(),
+            );
         }
-        println!("zone x20: {:?}", t.elapsed() / 20);
+        println!(
+            "zone x20: {:?} (checksum {:x})",
+            t.elapsed() / 20,
+            checksum(&d)
+        );
         return;
     }
     if std::env::args().any(|a| a == "dist") {

@@ -476,54 +476,66 @@ type Csr2 = (Vec<u32>, Vec<(i128, Point)>);
 /// on another segment's interior), and collects the candidate pixels of every leaf.
 #[inline(never)]
 fn pair_pass(segs: &[(Point, Point)], bboxes: &[Rect], grid: &Grid) -> PairPass {
-    let mut order = Vec::new();
-    let mut hot: Vec<(u32, (Point, bool))> = Vec::with_capacity(segs.len() * 2);
+    type Chunk = (Vec<(u32, (Point, bool))>, Vec<(u32, (i128, Point))>);
+    let chunks: Vec<Chunk> = crate::par::map_ranges(grid.n_cells(), |range| {
+        let mut order = Vec::new();
+        let mut hot: Vec<(u32, (Point, bool))> = Vec::new();
+        let mut splits: Vec<(u32, (i128, Point))> = Vec::new();
+        for c in range {
+            let items = grid.items(c);
+            // Endpoints, each reported by the leaf containing it.
+            for &i in items {
+                let (a, b) = segs[i as usize];
+                for p in [a, b] {
+                    if grid.in_leaf(c, p) {
+                        hot.push((c as u32, (p, false)));
+                    }
+                }
+            }
+            if items.len() < 2 {
+                continue;
+            }
+            for_each_pair(segs, items, bboxes, &mut order, |i, j| {
+                let (a, b) = segs[i as usize];
+                let (p, q) = segs[j as usize];
+                let o1 = orient(a, b, p).signum();
+                let o2 = orient(a, b, q).signum();
+                let o3 = orient(p, q, a).signum();
+                let o4 = orient(p, q, b).signum();
+                if o1 * o2 < 0 && o3 * o4 < 0 {
+                    let x = rounded_crossing(a, b, p, q);
+                    // Report each crossing once: in the leaf containing its pixel.
+                    if grid.in_leaf(c, x) {
+                        hot.push((c as u32, (x, true)));
+                    }
+                    return;
+                }
+                // T-junctions (each reported by the leaf containing the junction point).
+                let mut tj = |s: u32, u: Point, v: Point, o: i32, x: Point| {
+                    if o == 0
+                        && x != u
+                        && x != v
+                        && grid.in_leaf(c, x)
+                        && crate::predicates::on_segment(u, v, x)
+                    {
+                        splits.push((s, (crate::predicates::dist2(u, x), x)));
+                    }
+                };
+                tj(i, a, b, o1 as i32, p);
+                tj(i, a, b, o2 as i32, q);
+                tj(j, p, q, o3 as i32, a);
+                tj(j, p, q, o4 as i32, b);
+            });
+        }
+        (hot, splits)
+    });
+    // Concatenate in leaf order (deterministic for any number of threads).
+    let mut hot: Vec<(u32, (Point, bool))> =
+        Vec::with_capacity(chunks.iter().map(|c| c.0.len()).sum());
     let mut splits: Vec<(u32, (i128, Point))> = Vec::new();
-    for c in 0..grid.n_cells() {
-        let items = grid.items(c);
-        // Endpoints, each reported by the leaf containing it.
-        for &i in items {
-            let (a, b) = segs[i as usize];
-            for p in [a, b] {
-                if grid.in_leaf(c, p) {
-                    hot.push((c as u32, (p, false)));
-                }
-            }
-        }
-        if items.len() < 2 {
-            continue;
-        }
-        for_each_pair(segs, items, bboxes, &mut order, |i, j| {
-            let (a, b) = segs[i as usize];
-            let (p, q) = segs[j as usize];
-            let o1 = orient(a, b, p).signum();
-            let o2 = orient(a, b, q).signum();
-            let o3 = orient(p, q, a).signum();
-            let o4 = orient(p, q, b).signum();
-            if o1 * o2 < 0 && o3 * o4 < 0 {
-                let x = rounded_crossing(a, b, p, q);
-                // Report each crossing once: in the leaf containing its pixel.
-                if grid.in_leaf(c, x) {
-                    hot.push((c as u32, (x, true)));
-                }
-                return;
-            }
-            // T-junctions (each reported by the leaf containing the junction point).
-            let mut tj = |s: u32, u: Point, v: Point, o: i32, x: Point| {
-                if o == 0
-                    && x != u
-                    && x != v
-                    && grid.in_leaf(c, x)
-                    && crate::predicates::on_segment(u, v, x)
-                {
-                    splits.push((s, (crate::predicates::dist2(u, x), x)));
-                }
-            };
-            tj(i, a, b, o1 as i32, p);
-            tj(i, a, b, o2 as i32, q);
-            tj(j, p, q, o3 as i32, a);
-            tj(j, p, q, o4 as i32, b);
-        });
+    for (h, s) in chunks {
+        hot.extend(h);
+        splits.extend(s);
     }
     let (pstart, mut pix) = csr(grid.n_cells(), &hot);
     drop(hot);
@@ -681,12 +693,13 @@ impl<'a> Snap<'a> {
         }
     }
 
-    /// Computes all segment/pixel relations of leaf `c`.
-    fn process_leaf(&mut self, c: usize) {
-        if self.processed[c] {
-            return;
-        }
-        self.processed[c] = true;
+    /// Segment/pixel relations of leaf `c` (pure; `by_d` is scratch space).
+    fn leaf_relations(
+        &self,
+        c: usize,
+        by_d: &mut Vec<(i64, u32)>,
+        found: &mut Vec<(u32, u32, Rel)>,
+    ) {
         let base = self.pstart[c] as usize;
         let cp = &self.pix[base..self.pstart[c + 1] as usize];
         if cp.is_empty() {
@@ -700,13 +713,11 @@ impl<'a> Snap<'a> {
         } else {
             Dir::X
         };
-        self.by_d.clear();
+        by_d.clear();
         if dir != Dir::X {
-            self.by_d
-                .extend(cp.iter().enumerate().map(|(k, &p)| (dir.proj(p), k as u32)));
-            self.by_d.sort_unstable();
+            by_d.extend(cp.iter().enumerate().map(|(k, &p)| (dir.proj(p), k as u32)));
+            by_d.sort_unstable();
         }
-        let mut found: Vec<(u32, u32, Rel)> = Vec::new();
         for &s in items {
             let (a, b) = self.segs[s as usize];
             let bb = &self.bboxes[s as usize];
@@ -733,13 +744,28 @@ impl<'a> Snap<'a> {
                 // Pixels within distance 1 of the segment project within 2 units of its
                 // projected range.
                 let (lo, hi) = dir.range(&(a, b));
-                let from = self.by_d.partition_point(|x| x.0 < lo - 2);
-                let to = from + self.by_d[from..].partition_point(|x| x.0 <= hi + 2);
-                self.by_d[from..to]
-                    .iter()
-                    .for_each(|&(_, k)| test(k as usize));
+                let from = by_d.partition_point(|x| x.0 < lo - 2);
+                let to = from + by_d[from..].partition_point(|x| x.0 <= hi + 2);
+                by_d[from..to].iter().for_each(|&(_, k)| test(k as usize));
             }
         }
+    }
+
+    /// Computes all segment/pixel relations of leaf `c` and applies them.
+    fn process_leaf(&mut self, c: usize) {
+        if self.processed[c] {
+            return;
+        }
+        let mut by_d = core::mem::take(&mut self.by_d);
+        let mut found = Vec::new();
+        self.leaf_relations(c, &mut by_d, &mut found);
+        self.by_d = by_d;
+        self.apply(c, found);
+    }
+
+    /// Records the relations of leaf `c`, propagating hot pixels and affected segments.
+    fn apply(&mut self, c: usize, found: Vec<(u32, u32, Rel)>) {
+        self.processed[c] = true;
         for (s, k, r) in found {
             match r {
                 Rel::Near => self.near.push((s, k)),
@@ -765,6 +791,35 @@ impl<'a> Snap<'a> {
         }
     }
 
+    /// When crossings are dense almost every leaf ends up processed: compute all leaf
+    /// relations up front (in parallel with the `rayon` feature) and apply them in leaf
+    /// order. The fixpoint reached is the same as with lazy processing.
+    fn precompute_all(&mut self) {
+        let n = self.grid.n_cells();
+        let this = &*self;
+        let chunks: Vec<(usize, Vec<(u32, u32, Rel)>, Vec<u32>)> =
+            crate::par::map_ranges(n, |range| {
+                let mut by_d = Vec::new();
+                let mut found = Vec::new();
+                let mut ends = Vec::with_capacity(range.len());
+                let start = range.start;
+                for c in range {
+                    this.leaf_relations(c, &mut by_d, &mut found);
+                    ends.push(found.len() as u32);
+                }
+                (start, found, ends)
+            });
+        for (start, found, ends) in chunks {
+            let mut it = found.into_iter();
+            let mut prev = 0u32;
+            for (i, &e) in ends.iter().enumerate() {
+                let part: Vec<(u32, u32, Rel)> = it.by_ref().take((e - prev) as usize).collect();
+                prev = e;
+                self.apply(start + i, part);
+            }
+        }
+    }
+
     fn activate(&mut self, k: u32) {
         if !self.active[k as usize] {
             self.active[k as usize] = true;
@@ -781,10 +836,15 @@ impl<'a> Snap<'a> {
 
     fn run(&mut self) {
         // Crossing pixels are hot from the start: process their leaves, then propagate.
+        let mut hot = 0usize;
         for k in 0..self.active.len() {
             if self.active[k] {
                 self.px_queue.push(k as u32);
+                hot += 1;
             }
+        }
+        if hot * 16 > self.segs.len() {
+            self.precompute_all();
         }
         loop {
             if let Some(c) = self.leaf_queue.pop() {

@@ -93,7 +93,7 @@ impl Arrangement {
         // One sort into sweep order. Coincident fragments are adjacent (same start, same
         // direction); closed ones come first, ordered by operand, sign and tag so the merge
         // below is deterministic.
-        f.sort_unstable_by(|a, b| {
+        crate::par::sort_unstable_by(&mut f, |a, b| {
             cmp_sweep_edges((a.lo, a.hi), (b.lo, b.hi))
                 .then_with(|| a.hi.cmp(&b.hi))
                 .then_with(|| (b.open == u32::MAX).cmp(&(a.open == u32::MAX)))

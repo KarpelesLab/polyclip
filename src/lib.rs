@@ -105,6 +105,8 @@
 //! # Features
 //!
 //! * `serde`: `Serialize`/`Deserialize` for all data types.
+//! * `rayon`: parallelize the heavy phases of booleans (pair search, leaf processing, large
+//!   sorts). Results are identical to the sequential build, for any number of threads.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -121,6 +123,7 @@ mod geom;
 mod hull;
 mod node;
 mod offset;
+mod par;
 pub mod predicates;
 mod query;
 mod simplify;
