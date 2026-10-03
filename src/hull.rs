@@ -60,13 +60,19 @@ pub fn convex_hull_of<G: crate::query::Geometry + ?Sized>(g: &G) -> Result<Ring>
     convex_hull(pts)
 }
 
+/// Convex and simple: all turns have the sign of the area, and the ring winds exactly once
+/// (its area equals its hull's, which rules out stars whose turns all agree).
 fn is_convex(r: &[Point]) -> bool {
     let n = r.len();
     if n < 3 {
         return false;
     }
-    let s = ring_area2(r).signum();
-    (0..n).all(|i| orient(r[i], r[(i + 1) % n], r[(i + 2) % n]).signum() * s >= 0)
+    let a = ring_area2(r);
+    let s = a.signum();
+    if s == 0 || !(0..n).all(|i| orient(r[i], r[(i + 1) % n], r[(i + 2) % n]).signum() * s >= 0) {
+        return false;
+    }
+    convex_hull(r.iter().copied()).is_ok_and(|h| h.signed_area2() == a.abs())
 }
 
 fn add(a: Point, b: Point) -> Result<Point> {
