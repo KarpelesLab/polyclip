@@ -11,6 +11,7 @@ mod distance;
 mod error;
 mod fracture;
 mod geom;
+mod hull;
 mod node;
 mod offset;
 pub mod predicates;
@@ -27,6 +28,7 @@ pub use distance::{Closest, SqDist, distance, distance_less_than, distance_sq};
 pub use error::{Error, Result};
 pub use fracture::{fracture, fracture_set};
 pub use geom::*;
+pub use hull::{convex_hull, convex_hull_of, minkowski_sum};
 pub use offset::{
     EndCap, Join, closing, offset, offset_paths, offset_paths_tree, offset_tree, opening,
 };
