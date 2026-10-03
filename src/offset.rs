@@ -237,11 +237,11 @@ fn emit_vertex(
                     -core::f64::consts::PI
                 };
             }
-            let cx = cur.x as f64;
-            let cy = cur.y as f64;
+            let sx = cur.x as f64 + u1.x;
+            let sy = cur.y as f64 + u1.y;
             // A growing offset adds a disk around the vertex (convex arc); a shrinking one
             // removes it (concave arc).
-            arc_points(cx, cy, ad, a0, sweep, end, delta > 0.0, tol, out)?;
+            arc_points(sx, sy, ad, a0, sweep, end, delta > 0.0, tol, out)?;
         }
     }
     Ok(VKind::Join)

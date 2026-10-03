@@ -248,8 +248,6 @@ fn contour_area(c: &[Curve]) -> f64 {
 
 #[derive(Clone, Copy, Debug)]
 struct ArcGeom {
-    cx: f64,
-    cy: f64,
     r: f64,
     a0: f64,
     /// Signed sweep (positive = counter-clockwise).
@@ -270,8 +268,6 @@ fn arc_geom(start: Point, e: &Curve) -> Option<ArcGeom> {
                 let r = libm::hypot(start.x as f64 - cx, start.y as f64 - cy);
                 let a0 = libm::atan2(start.y as f64 - cy, start.x as f64 - cx);
                 return Some(ArcGeom {
-                    cx,
-                    cy,
                     r,
                     a0,
                     sweep: 2.0 * PI,
@@ -307,13 +303,7 @@ fn arc_geom(start: Point, e: &Curve) -> Option<ArcGeom> {
                     sweep -= 2.0 * PI;
                 }
             }
-            Some(ArcGeom {
-                cx,
-                cy,
-                r,
-                a0,
-                sweep,
-            })
+            Some(ArcGeom { r, a0, sweep })
         }
         Curve::CenterArc { center, end, ccw } => {
             if center == start {
@@ -339,13 +329,7 @@ fn arc_geom(start: Point, e: &Curve) -> Option<ArcGeom> {
                 }
                 s
             };
-            Some(ArcGeom {
-                cx,
-                cy,
-                r,
-                a0,
-                sweep,
-            })
+            Some(ArcGeom { r, a0, sweep })
         }
     }
 }
@@ -355,16 +339,18 @@ fn arc_geom(start: Point, e: &Curve) -> Option<ArcGeom> {
 /// [`arc_points`].
 fn step_for(r: f64, tol: i64, kind: Construction) -> f64 {
     let t = tol as f64;
-    let c = match kind {
-        Construction::Chord => 1.0 - t / r,
-        Construction::Tangent => r / (r + t),
-        Construction::Mid => (r - t) / (r + t),
+    // Half-step angles from numerically stable forms (no `acos` of values near 1, which
+    // would round to a zero step for huge radii).
+    let half = match kind {
+        // cos(h/2) = 1 - t/r
+        Construction::Chord if t < 2.0 * r => 2.0 * libm::asin(libm::sqrt(t / (2.0 * r))),
+        // cos(h/2) = r / (r + t)
+        Construction::Tangent => libm::atan(libm::sqrt(t * (2.0 * r + t)) / r),
+        // cos(h/2) = (r - t) / (r + t)
+        Construction::Mid if t < r => libm::atan(2.0 * libm::sqrt(r * t) / (r - t)),
+        _ => PI / 4.0,
     };
-    if c <= 0.0 {
-        PI / 2.0
-    } else {
-        (2.0 * libm::acos(c.min(1.0))).min(PI / 2.0)
-    }
+    (2.0 * half).min(PI / 2.0)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -423,14 +409,33 @@ pub(crate) fn round_pt(x: f64, y: f64) -> Result<Point> {
     Ok(Point::new(rx as i64, ry as i64))
 }
 
+/// Inward deviation of the chord from radius `r` (angle 0) to radius `rv` (angle `h`), for
+/// arcs whose end points lie on the circle while interior vertices sit at radius `rv`.
+fn end_chord_sag(r: f64, rv: f64, h: f64) -> f64 {
+    let (px, py) = (r, 0.0);
+    let (qx, qy) = (rv * libm::cos(h), rv * libm::sin(h));
+    let (dx, dy) = (qx - px, qy - py);
+    let len2 = dx * dx + dy * dy;
+    // Closest point of the segment to the centre.
+    let t = if len2 > 0.0 {
+        (-(px * dx + py * dy) / len2).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    r - libm::hypot(px + t * dx, py + t * dy)
+}
+
 /// Appends the polyline approximating an arc (excluding the start point, including `end`).
 ///
-/// `convex` tells whether the material lies on the centre's side of the arc (the region
-/// is locally the disk), which decides which construction realizes `tol.side`.
+/// The arc starts at `(sx, sy)` (exact, possibly non-integer), has radius `r`, starts at
+/// angle `a0` (as seen from the centre) and sweeps `sweep` radians. Vertices are computed
+/// relative to the start point, which keeps them accurate even for huge radii. `convex`
+/// tells whether the material lies on the centre's side of the arc (the region is locally
+/// the disk), which decides which construction realizes `tol.side`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn arc_points(
-    cx: f64,
-    cy: f64,
+    sx: f64,
+    sy: f64,
     r: f64,
     a0: f64,
     sweep: f64,
@@ -443,9 +448,37 @@ pub(crate) fn arc_points(
     if tol.tolerance < 1 {
         return Err(Error::InvalidParameter("arc tolerance must be >= 1"));
     }
+    let t = tol.tolerance as f64;
     let step = step_for(r, tol.tolerance, kind);
-    let n = segment_count(sweep, step)?;
+    let mut n = segment_count(sweep, step)?;
+    if kind == Construction::Mid {
+        // The end points stay on the circle: make sure the end chords (and a single chord)
+        // also stay within the tolerance.
+        loop {
+            let h = (sweep / n as f64).abs();
+            let rv = 2.0 * r / (1.0 + libm::cos(h / 2.0));
+            let sag = if n == 1 {
+                r * (1.0 - libm::cos(h / 2.0))
+            } else {
+                end_chord_sag(r, rv, h)
+            };
+            if sag <= t || n >= MAX_ARC_VERTICES {
+                break;
+            }
+            n += 1;
+        }
+    }
     let h = sweep / n as f64;
+    // Point at angle a0 + d on radius rv, relative to the start point:
+    // (rv - r) u(a0 + d) + 2 r sin(d / 2) u_perp(a0 + d / 2).
+    let at = |d: f64, rv: f64| -> Result<Point> {
+        let a = a0 + d;
+        let m = a0 + d / 2.0;
+        let s2 = 2.0 * r * libm::sin(d / 2.0);
+        let x = sx + (rv - r) * libm::cos(a) - s2 * libm::sin(m);
+        let y = sy + (rv - r) * libm::sin(a) + s2 * libm::cos(m);
+        round_pt(x, y)
+    };
     let push = |out: &mut Vec<Point>, p: Point| {
         if out.last() != Some(&p) {
             out.push(p);
@@ -454,28 +487,19 @@ pub(crate) fn arc_points(
     match kind {
         Construction::Chord => {
             for k in 1..n {
-                let a = a0 + h * k as f64;
-                push(out, round_pt(cx + r * libm::cos(a), cy + r * libm::sin(a))?);
+                push(out, at(h * k as f64, r)?);
             }
         }
         Construction::Tangent => {
             let rv = r / libm::cos(h / 2.0);
             for k in 0..n {
-                let a = a0 + h * (k as f64 + 0.5);
-                push(
-                    out,
-                    round_pt(cx + rv * libm::cos(a), cy + rv * libm::sin(a))?,
-                );
+                push(out, at(h * (k as f64 + 0.5), rv)?);
             }
         }
         Construction::Mid => {
             let rv = 2.0 * r / (1.0 + libm::cos(h / 2.0));
             for k in 1..n {
-                let a = a0 + h * k as f64;
-                push(
-                    out,
-                    round_pt(cx + rv * libm::cos(a), cy + rv * libm::sin(a))?,
-                );
+                push(out, at(h * k as f64, rv)?);
             }
         }
     }
@@ -513,8 +537,8 @@ fn approx_contour(
                 // Material on the centre's side: centre is on the left of a CCW arc.
                 let convex = (g.sweep > 0.0) == material_left;
                 arc_points(
-                    g.cx,
-                    g.cy,
+                    cur.x as f64,
+                    cur.y as f64,
                     g.r,
                     g.a0,
                     g.sweep,
