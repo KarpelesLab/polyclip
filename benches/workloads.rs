@@ -11,6 +11,9 @@
 //! * `offset_10k`: offset of a 10 000-vertex polygon by +0.1 mm with round joins
 //!   (1 µm arc tolerance), convex (circle) and non-convex (wavy star); target < 10 ms.
 //!
+//! * `curved_zone`: arc-preserving `curved_boolean` of a 100 mm x 100 mm board outline
+//!   with 5 mm corner radii minus 5 000 round pads (r = 0.3 mm, 1 um tolerance, inward
+//!   side), next to the plain polygon boolean of the same approximations.
 //! * `distance_less_than`: DRC-style threshold queries between 64-vertex polygons (target
 //!   < 1 µs on average including bounding-box rejection), and between near pairs only.
 //! * `zone_pipeline`: fracture and triangulation of the zone-fill result.
@@ -116,6 +119,76 @@ fn zone_minus_obstacles(c: &mut Criterion) {
     g.warm_up_time(Duration::from_millis(500));
     g.measurement_time(Duration::from_secs(3));
     g.bench_function("5000_circles_32v", |b| {
+        b.iter(|| {
+            boolean(
+                Op::Difference,
+                black_box(&zone),
+                black_box(&obst),
+                FillRule::NonZero,
+            )
+            .unwrap()
+        })
+    });
+    g.finish();
+}
+
+fn curved_zone_input() -> (Shape, Vec<Shape>) {
+    let side = 100 * MM;
+    let r = 5 * MM;
+    let p = Point::new;
+    let arc = |cx, cy, ex, ey| Curve::CenterArc {
+        center: p(cx, cy),
+        end: p(ex, ey),
+        ccw: true,
+    };
+    let board = Shape::new(
+        vec![
+            Curve::Line(p(side - r, 0)),
+            arc(side - r, r, side, r),
+            Curve::Line(p(side, side - r)),
+            arc(side - r, side - r, side - r, side),
+            Curve::Line(p(r, side)),
+            arc(r, side - r, 0, side - r),
+            Curve::Line(p(0, r)),
+            arc(r, r, r, 0),
+        ],
+        vec![],
+    );
+    let mut s = Lcg(7);
+    let pads = (0..5000)
+        .map(|_| {
+            let (x, y) = (s.below(side), s.below(side));
+            Shape::new(vec![arc(x, y, x + 3 * MM / 10, y)], vec![])
+        })
+        .collect();
+    (board, pads)
+}
+
+fn curved_zone(c: &mut Criterion) {
+    let (board, pads) = curved_zone_input();
+    let tol = ArcTol::new(1_000, Side::Inside);
+    let mut g = c.benchmark_group("curved_zone");
+    g.sample_size(10);
+    g.warm_up_time(Duration::from_millis(500));
+    g.measurement_time(Duration::from_secs(5));
+    g.bench_function("curved_boolean_5000_pads", |b| {
+        b.iter(|| {
+            curved_boolean(
+                Op::Difference,
+                std::slice::from_ref(black_box(&board)),
+                black_box(&pads),
+                FillRule::NonZero,
+                tol,
+            )
+            .unwrap()
+        })
+    });
+    let zone = board.to_polygon(tol).unwrap();
+    let obst: Vec<Polygon> = pads
+        .iter()
+        .map(|p| p.to_polygon(ArcTol::new(1_000, Side::Outside)).unwrap())
+        .collect();
+    g.bench_function("polygon_boolean_5000_pads", |b| {
         b.iter(|| {
             boolean(
                 Op::Difference,
@@ -240,6 +313,7 @@ criterion_group!(
     benches,
     union_circles,
     zone_minus_obstacles,
+    curved_zone,
     offset_10k,
     distance_queries,
     zone_pipeline,
