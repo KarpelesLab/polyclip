@@ -110,7 +110,8 @@ impl Grid {
             let i = i as u32;
             let (cx0, cx1) = (g.col(b.min.x - 1), g.col(b.max.x + 1));
             let (cy0, cy1) = (g.row(b.min.y - 1), g.row(b.max.y + 1));
-            if cx1 - cx0 <= 1 || cy1 - cy0 <= 1 {
+            // Short or axis-parallel segments: the whole (grown) bounding box of cells.
+            if cx1 - cx0 <= 2 || cy1 - cy0 <= 2 || sg.0.x == sg.1.x || sg.0.y == sg.1.y {
                 for cy in cy0..=cy1 {
                     for cx in cx0..=cx1 {
                         pairs.push(((cy * g.nx + cx) as u32, i));
@@ -674,6 +675,95 @@ mod tests {
                 .collect();
             let f = snap_round(&segs);
             assert_noded(&f);
+        }
+    }
+
+    #[test]
+    fn random_axis_parallel_noded() {
+        let mut s: u64 = 0xdead_beef;
+        let mut rnd = |m: i64| {
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((s >> 33) as i64).rem_euclid(m)
+        };
+        for it in 0..400 {
+            let n = 2 + rnd(80) as usize;
+            let range = 2 + rnd(if it % 2 == 0 { 20 } else { 2000 });
+            let segs: Vec<(Point, Point)> = (0..n)
+                .map(|_| {
+                    let a = p(rnd(range), rnd(range));
+                    match rnd(3) {
+                        0 => (a, p(a.x, rnd(range))),
+                        1 => (a, p(rnd(range), a.y)),
+                        _ => (a, p(rnd(range), rnd(range))),
+                    }
+                })
+                .filter(|(a, b)| a != b)
+                .collect();
+            for f in [snap_round(&segs), node_exact(&segs).unwrap_or_default()] {
+                assert_noded(&f);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod regression {
+    use super::*;
+    #[test]
+    fn degenerate_parallelograms_noded() {
+        // Long vertical segments were once registered in the wrong grid cells.
+        let p = Point::new;
+        let sq =
+            |x0: i64, y0: i64, x1: i64, y1: i64| vec![p(x0, y0), p(x1, y0), p(x1, y1), p(x0, y1)];
+        let a_rings = vec![sq(0, 0, 10, 10), vec![p(4, 4), p(4, 6), p(6, 6), p(6, 4)]];
+        let b = sq(0, 0, 1, 1);
+        let mut rings: Vec<Vec<Point>> = Vec::new();
+        for r in &a_rings {
+            rings.push(r.clone());
+        }
+        for ra in &a_rings {
+            let n = ra.len();
+            for i in 0..n {
+                let (p0, p1) = (ra[i], ra[(i + 1) % n]);
+                rings.push(b.iter().map(|q| p(q.x + p0.x, q.y + p0.y)).collect());
+                for j in 0..4 {
+                    let (q0, q1) = (b[j], b[(j + 1) % 4]);
+                    rings.push(vec![
+                        p(p0.x + q0.x, p0.y + q0.y),
+                        p(p1.x + q0.x, p1.y + q0.y),
+                        p(p1.x + q1.x, p1.y + q1.y),
+                        p(p0.x + q1.x, p0.y + q1.y),
+                    ]);
+                }
+            }
+        }
+        let mut segs = Vec::new();
+        for r in &rings {
+            for i in 0..r.len() {
+                let (a, b) = (r[i], r[(i + 1) % r.len()]);
+                if a != b {
+                    segs.push((a, b));
+                }
+            }
+        }
+        let frags = snap_round(&segs);
+        for (i, f) in frags.iter().enumerate() {
+            for g in &frags[i + 1..] {
+                for v in [g.a, g.b] {
+                    if in_segment_interior(f.a, f.b, v) {
+                        panic!(
+                            "{v:?} on {f:?} (seg {:?}) from {g:?} (seg {:?})",
+                            segs[f.src as usize], segs[g.src as usize]
+                        );
+                    }
+                }
+                assert!(
+                    !segments_cross_properly(f.a, f.b, g.a, g.b),
+                    "{f:?} x {g:?}"
+                );
+            }
         }
     }
 }
