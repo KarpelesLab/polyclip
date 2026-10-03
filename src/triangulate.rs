@@ -243,6 +243,13 @@ impl Mesh {
                 }
             }
         }
+        // Split edges at vertices lying on their interiors (exactly), so that partially
+        // shared edges become identical pieces that cancel below. Proper crossings mean
+        // invalid input.
+        let raw: Vec<(Point, Point)> = match crate::node::node_exact(&raw) {
+            Ok(frags) => frags.into_iter().map(|f| (f.a, f.b)).collect(),
+            Err(_) => return Err(INVALID),
+        };
         let mut verts: Vec<Point> = Vec::with_capacity(raw.len());
         verts.extend(raw.iter().map(|e| e.0));
         verts.sort_unstable();
