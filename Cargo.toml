@@ -7,7 +7,7 @@ exclude = ["fuzz", "oracle"]
 
 [package]
 name = "polyclip"
-version = "0.0.0"
+version = "0.0.1"
 edition = "2024"
 rust-version = "1.89"
 description = "Exact integer 2D polygon geometry: booleans, offsetting, arcs, distance queries, fracture, triangulation."

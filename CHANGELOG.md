@@ -1,0 +1,40 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+## [0.0.1](https://github.com/KarpelesLab/polyclip/compare/v0.0.0...v0.0.1) - 2026-10-03
+
+### Added
+
+- optional rayon feature for internal parallelism
+- arc/circle approximation with side selection and polygon/path offsetting
+- exact queries (locate, intersects, contains, area, centroid) and validity checks
+- snap-rounding noder, plane sweep and boolean operations
+
+### Fixed
+
+- reject i64::MIN in opening/closing, range-check shapes and single-vertex paths
+
+### Other
+
+- refresh performance table, document rayon and verification; test Send + Sync
+- trim concave offset joins at the edge intersection when safe
+- satisfy clippy type_complexity in leaf precompute
+- end-to-end PCB-like zone fill pipeline
+- lazy, leaf-local snap rounding and assembly without re-sorting
+- adaptive spatial index for noding and blocked sweep status
+- Merge branch 'worktree-agent-a9b88d6dabd25a4db'
+- run the Clipper2 differential tests on push and pull requests
+- add differential tests against Clipper2 in a standalone oracle crate
+- check that the benchmarks compile
+- add criterion benchmarks for the spec workloads
+- run the fuzz targets weekly and on demand
+- add cargo-fuzz targets for every public operation
+- hash-based ring linking, split noder phases, float pre-filters for pixel tests
+- grid-based noder, single sweep-order sort, float-filtered crossing rounding
+- add CI, crates.io, docs.rs and license badges
