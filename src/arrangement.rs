@@ -72,6 +72,7 @@ impl Arrangement {
 
     /// Merges coincident fragments into sorted arrangement edges (no windings yet).
     fn merge(input: &[InEdge], frags: Vec<Frag>) -> Arrangement {
+        #[derive(Clone, Copy, Default)]
         struct F {
             lo: Point,
             hi: Point,
@@ -109,14 +110,18 @@ impl Arrangement {
         // One sort into sweep order. Coincident fragments are adjacent (same start, same
         // direction); closed ones come first, ordered by operand, sign and tag so the merge
         // below is deterministic.
-        crate::par::sort_unstable_by(&mut f, |a, b| {
-            cmp_sweep_edges((a.lo, a.hi), (b.lo, b.hi))
-                .then_with(|| a.hi.cmp(&b.hi))
-                .then_with(|| (b.open == u32::MAX).cmp(&(a.open == u32::MAX)))
-                .then_with(|| {
-                    (a.operand, a.sign, a.tag, a.open).cmp(&(b.operand, b.sign, b.tag, b.open))
-                })
-        });
+        let f = crate::par::bucket_sort_by_x(
+            f,
+            |e| e.lo.x,
+            |a, b| {
+                cmp_sweep_edges((a.lo, a.hi), (b.lo, b.hi))
+                    .then_with(|| a.hi.cmp(&b.hi))
+                    .then_with(|| (b.open == u32::MAX).cmp(&(a.open == u32::MAX)))
+                    .then_with(|| {
+                        (a.operand, a.sign, a.tag, a.open).cmp(&(b.operand, b.sign, b.tag, b.open))
+                    })
+            },
+        );
         let mut edges: Vec<MEdge> = Vec::with_capacity(f.len());
         let mut i = 0;
         while i < f.len() {
