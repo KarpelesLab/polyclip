@@ -73,7 +73,7 @@
 //! * each ring starts at its lexicographically smallest vertex (min `x`, then min `y`);
 //! * holes sorted by vertex sequence, polygons sorted by their outer ring's vertex sequence;
 //! * regions touching at a single point are separate rings (rings never share an edge);
-//! * bit-identical across platforms and runs.
+//! * bit-identical across platforms, runs and thread counts.
 //!
 //! [`check_canonical`] verifies all of the above; [`validate`] checks validity of arbitrary
 //! input with a reason.
@@ -95,7 +95,8 @@
 //!
 //! * reconstruct arcs after booleans and offsets: tag the edges of each approximated arc
 //!   with an arc id ([`Shape::to_tagged`], [`offset_shape_tagged`]); consecutive output
-//!   edges with the same id form one arc (emit it as a single Gerber arc);
+//!   edges with the same id form one arc, which [`arcs_from_tags`] turns back into arc
+//!   elements (emit them as single Gerber arcs);
 //! * explain results: "this fill edge comes from the clearance around U3 pad 7".
 //!
 //! # Robustness
@@ -103,7 +104,18 @@
 //! No operation panics on any input: degenerate rings, collinear or duplicate points,
 //! coincident edges, zero area and huge vertex counts give a well-defined result or an
 //! error. The crate has no `unsafe` code and no global state; all types are `Send + Sync`.
-//! The [`Boolean`] engine can be reused to avoid reallocations.
+//! A [`Boolean`] engine can be cleared and reused across calls.
+//!
+//! # Operations
+//!
+//! | Area | Items |
+//! |---|---|
+//! | Booleans | [`Boolean`], [`boolean`], [`union_all`], [`clip_paths`] |
+//! | Offsetting | [`offset`], [`offset_tree`], [`offset_tagged`], [`offset_paths`], [`offset_shape`], [`opening`], [`closing`] |
+//! | Curves | [`Circle`], [`Shape`], [`Curve`], [`ArcTol`], [`Side`], [`arcs_from_tags`] |
+//! | Queries | [`locate`], [`intersects`], [`contains`], [`area2`], [`centroid`], [`distance`], [`distance_less_than`] |
+//! | Validity | [`validate`], [`validate_set`], [`check_canonical`] |
+//! | Utilities | [`fracture`], [`simplify_polygons`], [`triangulate`], [`triangulate_delaunay`], [`convex_hull`], [`minkowski_sum`], [`trapezoids`] |
 //!
 //! # Features
 //!
