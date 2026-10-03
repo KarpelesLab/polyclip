@@ -74,8 +74,8 @@ Single thread unless noted, Apple Silicon laptop, release build (`cargo bench`,
 
 | Workload | polyclip | with `rayon` | Clipper2 (C++) |
 |---|---|---|---|
-| zone 100 mm × 100 mm − 5 000 inflated obstacles | ~49 ms | ~40 ms | ~41 ms |
-| union of 50 000 heavily overlapping 64-vertex circles | ~3.4 s | ~2.4 s | ~157 s |
+| zone 100 mm × 100 mm − 5 000 inflated obstacles | ~43 ms | ~38 ms | ~41 ms |
+| union of 50 000 heavily overlapping 64-vertex circles | ~3.2 s | ~2.3 s | ~157 s |
 | offset of a 10 000-vertex polygon (round joins), convex | ~8.9 ms | | ~0.9 ms |
 | offset of a 10 000-vertex wavy star | ~21 ms | | |
 | `distance_less_than`, 64-vertex polygons (average incl. bbox rejection) | ~80 ns | | |
@@ -84,8 +84,10 @@ Single thread unless noted, Apple Silicon laptop, release build (`cargo bench`,
 | union of 50 000 stacked slots / diagonal slots (long dense parallel edges) | ~76 / ~99 ms | | |
 
 The noder adapts its spatial index to the data (uniform grid or k-d tree, sweeps along
-the thinnest of four directions), so long, dense or parallel edges do not degrade into
-quadratic behaviour.
+the direction in which the segments are thinnest, including the dominant segment
+direction), and distance queries use direction-adaptive sweeps and bounding-volume
+hierarchies, so long, dense or parallel edges at any angle do not degrade into quadratic
+behaviour.
 
 ## Feature flags
 
