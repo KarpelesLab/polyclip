@@ -206,10 +206,7 @@ fn containment<A: Geometry + ?Sized, B: Geometry + ?Sized>(outer: &A, inner: &B)
 pub fn distance<A: Geometry + ?Sized, B: Geometry + ?Sized>(a: &A, b: &B) -> Option<Closest> {
     let ba = a.bbox()?;
     let bb = b.bbox()?;
-    if ![ba.min, ba.max, bb.min, bb.max]
-        .iter()
-        .all(|p| p.in_range())
-    {
+    if !crate::query::in_range(a) || !crate::query::in_range(b) {
         return None;
     }
     let everything = Rect {
@@ -399,6 +396,10 @@ pub fn distance_less_than<A: Geometry + ?Sized, B: Geometry + ?Sized>(
     }
     let d2 = d as u128 * d as u128;
     if rect_gap2(&ba, &bb) >= d2 {
+        return false;
+    }
+    // Full range check (holes included) only for pairs that survive the box test.
+    if !crate::query::in_range(a) || !crate::query::in_range(b) {
         return false;
     }
     let mut sa = collect_segments(a, &bb.expand(d));

@@ -398,8 +398,10 @@ impl<T: Geometry + ?Sized> Geometry for &T {
 /// `true` when every coordinate of `g` lies within `±`[`MAX_COORD`](crate::MAX_COORD)
 /// (vacuously for an empty geometry).
 pub fn in_range<G: Geometry + ?Sized>(g: &G) -> bool {
-    g.bbox()
-        .is_none_or(|b| b.min.in_range() && b.max.in_range())
+    // Every vertex, not just a bounding box: a polygon's box covers its outer ring only.
+    let mut ok = true;
+    g.visit_segments(&mut |a, b| ok &= a.in_range() && b.in_range());
+    ok
 }
 
 /// Location of `p` relative to `g`.
@@ -564,7 +566,7 @@ pub fn intersects<A: Geometry + ?Sized, B: Geometry + ?Sized>(a: &A, b: &B) -> b
     {
         return false;
     }
-    if !ba.intersects(&bb) {
+    if !ba.intersects(&bb) || !in_range(a) || !in_range(b) {
         return false;
     }
     let mut sa = collect_segments(a, &bb);
@@ -615,6 +617,8 @@ pub fn contains<A: Geometry + ?Sized, B: Geometry + ?Sized>(a: &A, b: &B) -> boo
         .iter()
         .all(|p| p.in_range())
         || !ba.contains_rect(&bb)
+        || !in_range(a)
+        || !in_range(b)
     {
         return false;
     }
