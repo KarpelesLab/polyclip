@@ -90,7 +90,6 @@ impl Arrangement {
             });
         }
         drop(frags);
-        let t0 = std::time::Instant::now();
         // One sort into sweep order. Coincident fragments are adjacent (same start, same
         // direction); closed ones come first, ordered by operand, sign and tag so the merge
         // below is deterministic.
@@ -102,9 +101,6 @@ impl Arrangement {
                     (a.operand, a.sign, a.tag, a.open).cmp(&(b.operand, b.sign, b.tag, b.open))
                 })
         });
-        if f.len() > 1000000 {
-            eprintln!("frag sort {:?}", t0.elapsed());
-        }
         let mut edges: Vec<MEdge> = Vec::with_capacity(f.len());
         let mut i = 0;
         while i < f.len() {

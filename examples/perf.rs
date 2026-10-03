@@ -73,6 +73,13 @@ fn main() {
         t.elapsed(),
         d.len()
     );
+    let t = Instant::now();
+    let f = fracture_set(&d).unwrap();
+    println!(
+        "fracture zone: {:?} -> {} verts",
+        t.elapsed(),
+        f.iter().map(|r| r.len()).sum::<usize>()
+    );
 
     let big = circle(0, 0, 50_000_000.0, 10_000);
     let t = Instant::now();
