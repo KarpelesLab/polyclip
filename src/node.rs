@@ -244,21 +244,27 @@ fn rounded_crossing(a: Point, b: Point, c: Point, d: Point) -> Point {
 pub(crate) fn snap_round(segs: &[(Point, Point)]) -> Vec<Frag> {
     let bboxes: Vec<Rect> = segs.iter().map(seg_bbox).collect();
     let grid = Grid::build(segs, &bboxes);
-    let (pstart, pix) = hot_pixels(segs, &bboxes, &grid);
+    let (pstart, pix, mut active) = hot_pixels(segs, &bboxes, &grid);
     let (hits, near) = find_hits(segs, &bboxes, &grid, &pstart, &pix);
-    drop((pstart, pix, grid, bboxes));
-    build_frags(segs, &hits, &near)
+    let affected = activate(segs, &grid, &pstart, &pix, &hits, &mut active);
+    drop((pstart, grid, bboxes));
+    build_frags(segs, &pix, &hits, &near, &affected)
 }
 
-/// Hot pixels (endpoints and rounded proper crossings), grouped by cell (CSR), each cell
-/// sorted by `(x, y)` without duplicates.
+/// Candidate hot pixels (endpoints and rounded proper crossings), grouped by cell (CSR),
+/// each cell sorted by `(x, y)` without duplicates, with an "active" flag initially set for
+/// crossing pixels only.
 #[inline(never)]
-fn hot_pixels(segs: &[(Point, Point)], bboxes: &[Rect], grid: &Grid) -> (Vec<u32>, Vec<Point>) {
+fn hot_pixels(
+    segs: &[(Point, Point)],
+    bboxes: &[Rect],
+    grid: &Grid,
+) -> (Vec<u32>, Vec<Point>, Vec<bool>) {
     let mut order = Vec::new();
-    let mut hot: Vec<(u32, Point)> = Vec::with_capacity(segs.len() * 2);
+    let mut hot: Vec<(u32, (Point, bool))> = Vec::with_capacity(segs.len() * 2);
     for s in segs {
-        hot.push((grid.cell(s.0) as u32, s.0));
-        hot.push((grid.cell(s.1) as u32, s.1));
+        hot.push((grid.cell(s.0) as u32, (s.0, false)));
+        hot.push((grid.cell(s.1) as u32, (s.1, false)));
     }
     for c in 0..grid.n_cells() {
         let items = grid.items(c);
@@ -273,34 +279,47 @@ fn hot_pixels(segs: &[(Point, Point)], bboxes: &[Rect], grid: &Grid) -> (Vec<u32
                 // Report each crossing once: in the cell containing its pixel.
                 let xc = grid.cell(x);
                 if xc == c {
-                    hot.push((xc as u32, x));
+                    hot.push((xc as u32, (x, true)));
                 }
             }
         });
     }
     let (pstart, mut pix) = csr(grid.n_cells(), &hot);
     drop(hot);
-    // Sort and dedup within each cell, compacting in place.
+    // Sort and dedup within each cell (merging flags), compacting in place.
     let mut out_start = vec![0u32; grid.n_cells() + 1];
     let mut w = 0usize;
     for c in 0..grid.n_cells() {
         let (s0, s1) = (pstart[c] as usize, pstart[c + 1] as usize);
         pix[s0..s1].sort_unstable();
         for k in s0..s1 {
-            let p = pix[k];
-            if k == s0 || p != pix[k - 1] {
-                pix[w] = p;
+            let (p, f) = pix[k];
+            if w > out_start[c] as usize && pix[w - 1].0 == p {
+                pix[w - 1].1 |= f;
+            } else {
+                pix[w] = (p, f);
                 w += 1;
             }
         }
         out_start[c + 1] = w as u32;
     }
     pix.truncate(w);
-    (out_start, pix)
+    let active = pix.iter().map(|x| x.1).collect();
+    (out_start, pix.into_iter().map(|x| x.0).collect(), active)
 }
 
-/// Per segment (CSR), the hot pixels it meets other than its own endpoints, and the hot
-/// pixel centres close enough to possibly lie on one of its fragments.
+/// Index of the candidate pixel at `p` (which must be one).
+fn pixel_index(grid: &Grid, pstart: &[u32], pix: &[Point], p: Point) -> Option<u32> {
+    let c = grid.cell(p);
+    let s = &pix[pstart[c] as usize..pstart[c + 1] as usize];
+    s.binary_search(&p).ok().map(|k| pstart[c] + k as u32)
+}
+
+type Csr = (Vec<u32>, Vec<u32>);
+
+/// Per segment (CSR of pixel indices), the candidate pixels it meets other than its own
+/// endpoints, and the candidate pixel centres close enough to possibly lie on one of its
+/// fragments.
 #[inline(never)]
 fn find_hits(
     segs: &[(Point, Point)],
@@ -308,11 +327,12 @@ fn find_hits(
     grid: &Grid,
     pstart: &[u32],
     pix: &[Point],
-) -> ((Vec<u32>, Vec<Point>), (Vec<u32>, Vec<Point>)) {
-    let mut hits: Vec<(u32, Point)> = Vec::new();
-    let mut near: Vec<(u32, Point)> = Vec::new();
+) -> (Csr, Csr) {
+    let mut hits: Vec<(u32, u32)> = Vec::new();
+    let mut near: Vec<(u32, u32)> = Vec::new();
     for c in 0..grid.n_cells() {
-        let cp = &pix[pstart[c] as usize..pstart[c + 1] as usize];
+        let base = pstart[c] as usize;
+        let cp = &pix[base..pstart[c + 1] as usize];
         if cp.is_empty() {
             continue;
         }
@@ -327,7 +347,7 @@ fn find_hits(
             let dx = (b.x - a.x) as f64;
             let dy = (b.y - a.y) as f64;
             let len2 = dx * dx + dy * dy;
-            for &p in &cp[from..] {
+            for (k, &p) in cp.iter().enumerate().skip(from) {
                 if p.x > bb.max.x + 1 {
                     break;
                 }
@@ -353,10 +373,11 @@ fn find_hits(
                 let t = dx * px + dy * py;
                 let inside =
                     o * o < 0.24 * len2 && t > len2.sqrt() * 0.75 && t < len2 - len2.sqrt() * 0.75;
+                let id = (base + k) as u32;
                 if inside || segment_pixel_entry(a, b, p).is_some() {
-                    hits.push((si, p));
+                    hits.push((si, id));
                 } else {
-                    near.push((si, p));
+                    near.push((si, id));
                 }
             }
         }
@@ -364,48 +385,123 @@ fn find_hits(
     (csr(segs.len(), &hits), csr(segs.len(), &near))
 }
 
-/// Builds the fragments of every segment from its hot pixels.
+/// Decides which candidate pixels are hot and which segments get rerouted.
+///
+/// Crossing pixels are hot. A segment meeting a hot pixel (other than at its own endpoints)
+/// is rerouted ("affected"), and every candidate pixel an affected segment meets, including
+/// its own endpoints, becomes hot in turn — until nothing changes. Segments that are not
+/// affected keep their exact original position, so input without crossings is returned
+/// unchanged (only split at vertices lying exactly on segments). Within the affected part,
+/// this is Hobby's snap rounding with all relevant hot pixels, which preserves topology.
+#[inline(never)]
+fn activate(
+    segs: &[(Point, Point)],
+    grid: &Grid,
+    pstart: &[u32],
+    pix: &[Point],
+    hits: &Csr,
+    active: &mut [bool],
+) -> Vec<bool> {
+    let n = segs.len();
+    let (hstart, hpix) = (&hits.0, &hits.1);
+    // Pixel -> segments meeting it.
+    let mut rev: Vec<(u32, u32)> = Vec::with_capacity(hpix.len());
+    for s in 0..n {
+        for &p in &hpix[hstart[s] as usize..hstart[s + 1] as usize] {
+            rev.push((p, s as u32));
+        }
+    }
+    let (rstart, rseg) = csr(pix.len(), &rev);
+    drop(rev);
+    let mut affected = vec![false; n];
+    let mut px_stack: Vec<u32> = (0..pix.len() as u32)
+        .filter(|&p| active[p as usize])
+        .collect();
+    let mut seg_stack: Vec<u32> = Vec::new();
+    loop {
+        if let Some(p) = px_stack.pop() {
+            for &s in &rseg[rstart[p as usize] as usize..rstart[p as usize + 1] as usize] {
+                if !affected[s as usize] {
+                    affected[s as usize] = true;
+                    seg_stack.push(s);
+                }
+            }
+        } else if let Some(s) = seg_stack.pop() {
+            let (a, b) = segs[s as usize];
+            let own = [
+                pixel_index(grid, pstart, pix, a),
+                pixel_index(grid, pstart, pix, b),
+            ];
+            let met = hpix[hstart[s as usize] as usize..hstart[s as usize + 1] as usize]
+                .iter()
+                .copied();
+            for p in met.chain(own.into_iter().flatten()) {
+                if !active[p as usize] {
+                    active[p as usize] = true;
+                    px_stack.push(p);
+                }
+            }
+        } else {
+            break;
+        }
+    }
+    affected
+}
+
+/// Builds the fragments of every segment.
 #[inline(never)]
 fn build_frags(
     segs: &[(Point, Point)],
-    hits: &(Vec<u32>, Vec<Point>),
-    near: &(Vec<u32>, Vec<Point>),
+    pix: &[Point],
+    hits: &Csr,
+    near: &Csr,
+    affected: &[bool],
 ) -> Vec<Frag> {
     let (hstart, hits) = (&hits.0, &hits.1);
     let (nstart, near) = (&near.0, &near.1);
-    let mut out: Vec<Frag> = Vec::with_capacity(segs.len() + hits.len() + near.len());
+    let mut out: Vec<Frag> = Vec::with_capacity(segs.len() + hits.len());
     let mut poly: Vec<Point> = Vec::new();
     let mut ord: Vec<(i128, Point)> = Vec::new();
     let mut ins: Vec<(usize, i128, Point)> = Vec::new();
     for (si, &(a, b)) in segs.iter().enumerate() {
         let h = &hits[hstart[si] as usize..hstart[si + 1] as usize];
         let nr = &near[nstart[si] as usize..nstart[si + 1] as usize];
+        let aff = affected[si];
         let si = si as u32;
-        if h.is_empty() && nr.is_empty() {
+        if h.is_empty() && (nr.is_empty() || !aff) {
             out.push(Frag { a, b, src: si });
             continue;
         }
         // Hot pixels are met in the order of their centres' projections on the segment
-        // direction (pixel rows and columns are traversed monotonically).
+        // direction (pixel rows and columns are traversed monotonically). An unaffected
+        // segment is only split at candidate centres lying exactly on it.
         let d = sub(b, a);
         ord.clear();
-        ord.extend(h.iter().map(|&p| (dot(sub(p, a), d), p)));
+        ord.extend(
+            h.iter()
+                .map(|&k| pix[k as usize])
+                .filter(|&p| aff || orient(a, b, p) == 0)
+                .map(|p| (dot(sub(p, a), d), p)),
+        );
         ord.sort_unstable();
         poly.clear();
         poly.push(a);
         poly.extend(ord.iter().map(|x| x.1));
         poly.push(b);
-        // T-junctions: hot pixel centres lying on a fragment's interior.
+        // T-junctions: candidate centres lying on a rerouted fragment's interior.
         ins.clear();
-        for &c in nr {
-            for k in 0..poly.len() - 1 {
-                if in_segment_interior(poly[k], poly[k + 1], c) {
-                    ins.push((k, crate::predicates::dist2(poly[k], c), c));
-                    break;
+        if aff {
+            for &k in nr {
+                let c = pix[k as usize];
+                for k in 0..poly.len() - 1 {
+                    if in_segment_interior(poly[k], poly[k + 1], c) {
+                        ins.push((k, crate::predicates::dist2(poly[k], c), c));
+                        break;
+                    }
                 }
             }
+            ins.sort_unstable();
         }
-        ins.sort_unstable();
         let mut j = 0;
         for k in 0..poly.len() - 1 {
             let mut cur = poly[k];
