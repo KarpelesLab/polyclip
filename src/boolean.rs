@@ -6,6 +6,7 @@ use crate::error::{Error, Result};
 use crate::geom::{
     Path, Point, PolyTree, Polygon, PolygonSet, Ring, TaggedPath, TaggedPolygon, TaggedRing,
 };
+use crate::sweep::sweep_events;
 
 /// Rule deciding which regions are "inside" from their winding number.
 ///
@@ -302,32 +303,94 @@ impl Boolean {
     }
 }
 
-/// Computes the directed boundary edges of the region `{ inside(winding) }`.
+/// Minimal union-find over region ids.
+struct Regions {
+    parent: Vec<u32>,
+}
+
+impl Regions {
+    fn add(&mut self) -> u32 {
+        self.parent.push(self.parent.len() as u32);
+        self.parent.len() as u32 - 1
+    }
+    fn find(&mut self, mut x: u32) -> u32 {
+        while self.parent[x as usize] != x {
+            let p = self.parent[self.parent[x as usize] as usize];
+            self.parent[x as usize] = p;
+            x = p;
+        }
+        x
+    }
+    fn union(&mut self, a: u32, b: u32) {
+        let (a, b) = (self.find(a), self.find(b));
+        if a != b {
+            // Keep the smaller id as root (deterministic).
+            let (lo, hi) = if a < b { (a, b) } else { (b, a) };
+            self.parent[hi as usize] = lo;
+        }
+    }
+}
+
+/// Computes the directed boundary edges of the region `{ inside(winding) }`, in sweep
+/// order, each with the connected regions on its two sides.
+///
+/// One sweep computes winding numbers and, with a union-find over the gaps between
+/// consecutive status edges, the connected components of the result and of its complement:
+/// gaps on both sides of a non-boundary edge belong to the same component, and gaps meeting
+/// at a vertex where edges only end merge. Region 0 is the unbounded exterior.
 fn compute(edges: &[InEdge], inside: impl Fn([i32; 2]) -> bool) -> Vec<DirEdge> {
-    let Ok(arr) = Arrangement::build(edges, Noding::Snap) else {
-        unreachable!("snap rounding never fails")
-    };
-    let mut out = Vec::new();
-    for (e, wb) in arr.edges.iter().zip(arr.below.iter()) {
-        let wa = [wb[0] + e.delta[0], wb[1] + e.delta[1]];
-        let ib = inside(*wb);
-        let ia = inside(wa);
-        if ib != ia {
-            // Interior on the left: above for lo->hi.
-            if ia {
-                out.push(DirEdge {
-                    from: e.lo,
-                    to: e.hi,
-                    tag: e.tag,
-                });
+    let arr = Arrangement::build_unwound(edges);
+    let n = arr.edges.len();
+    let segs: Vec<(Point, Point)> = arr.edges.iter().map(|e| (e.lo, e.hi)).collect();
+    let mut below_w = vec![[0i32; 2]; n];
+    let mut gap_above = vec![0u32; n];
+    let mut reg = Regions { parent: vec![0] };
+    let mut out: Vec<DirEdge> = Vec::new();
+    let delta = |k: usize| arr.edges[k].delta;
+    sweep_events(&segs, |below, ending, starting| {
+        let g_below = below.map_or(0, |b| gap_above[b as usize]);
+        let g_above = ending.last().map_or(g_below, |&e| gap_above[e as usize]);
+        if starting.is_empty() {
+            if !ending.is_empty() {
+                reg.union(g_below, g_above);
+            }
+            return;
+        }
+        let mut gb = g_below;
+        let mut wb = below.map_or([0, 0], |b| {
+            let b = b as usize;
+            [below_w[b][0] + delta(b)[0], below_w[b][1] + delta(b)[1]]
+        });
+        let last = starting.end - 1;
+        for k in starting {
+            let ku = k as usize;
+            let d = delta(ku);
+            let wa = [wb[0] + d[0], wb[1] + d[1]];
+            let ga = if k == last { g_above } else { reg.add() };
+            below_w[ku] = wb;
+            gap_above[ku] = ga;
+            let (ib, ia) = (inside(wb), inside(wa));
+            if ib == ia {
+                reg.union(gb, ga);
             } else {
+                let e = &arr.edges[ku];
+                // Interior on the left: above for lo->hi.
+                let (from, to) = if ia { (e.lo, e.hi) } else { (e.hi, e.lo) };
                 out.push(DirEdge {
-                    from: e.hi,
-                    to: e.lo,
+                    from,
+                    to,
                     tag: e.tag,
+                    below: gb,
+                    above: ga,
                 });
             }
+            gb = ga;
+            wb = wa;
         }
+    });
+    for e in out.iter_mut() {
+        e.below = reg.find(e.below);
+        e.above = reg.find(e.above);
     }
     out
 }

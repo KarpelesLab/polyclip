@@ -4,15 +4,17 @@
 use crate::geom::{Point, PolyNode, PolyTree, Ring};
 use crate::predicates::{cmp_dir_halfplane, cross, dot, orient, sub};
 use crate::query::ring_area2;
-use crate::sweep::{cmp_sweep_edges, sweep};
 use core::cmp::Ordering;
 
-/// A directed boundary edge with its provenance tag.
+/// A directed boundary edge with its provenance tag and the connected regions below and
+/// above it (in sweep terms; region 0 is the unbounded exterior).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct DirEdge {
     pub from: Point,
     pub to: Point,
     pub tag: u64,
+    pub below: u32,
+    pub above: u32,
 }
 
 /// A ring under construction: vertices and per-edge tags.
@@ -256,19 +258,13 @@ pub(crate) fn rotate_to_min(r: &mut RawRing) {
     }
 }
 
-/// Parent of every ring in the nesting tree. `edges` must be in sweep order (as produced
-/// by the arrangement), `rings` simple, pairwise non-crossing and oriented with the interior
-/// on their left.
-fn nesting(edges: &[DirEdge], rings: &[Vec<u32>], is_hole: &[bool]) -> Vec<Option<u32>> {
-    let n = edges.len();
-    const NONE: u32 = u32::MAX;
-    let mut ring_of = vec![NONE; n];
-    let mut query = vec![false; n];
+/// Parent of every ring in the nesting tree, from the connected regions recorded on the
+/// edges: a ring is the outer boundary of the region just above its lowest edge at its
+/// smallest vertex, and its parent is the outer boundary of the region just below.
+fn nesting(edges: &[DirEdge], rings: &[Vec<u32>]) -> Vec<Option<u32>> {
+    let mut outer_of: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+    let mut below: Vec<u32> = Vec::with_capacity(rings.len());
     for (ri, r) in rings.iter().enumerate() {
-        for &k in r {
-            ring_of[k as usize] = ri as u32;
-        }
-        // At the ring's smallest vertex, the lower of its two edges is the query edge.
         let m = r.len();
         let (i, _) = r
             .iter()
@@ -285,60 +281,19 @@ fn nesting(edges: &[DirEdge], rings: &[Vec<u32>], is_hole: &[bool]) -> Vec<Optio
         } else {
             in_e
         };
-        query[q] = true;
+        outer_of.insert(edges[q].above, ri as u32);
+        below.push(edges[q].below);
     }
-    let segs: Vec<(Point, Point)> = edges
+    below
         .iter()
-        .map(|e| {
-            if e.from < e.to {
-                (e.from, e.to)
+        .map(|b| {
+            if *b == 0 {
+                None
             } else {
-                (e.to, e.from)
+                outer_of.get(b).copied()
             }
         })
-        .collect();
-    debug_assert!(
-        segs.windows(2)
-            .all(|w| cmp_sweep_edges(w[0], w[1]) != Ordering::Greater)
-    );
-    let mut parent: Vec<Option<u32>> = vec![None; rings.len()];
-    sweep(&segs, |e, below| {
-        let e = e as usize;
-        if !query[e] || ring_of[e] == NONE {
-            return;
-        }
-        let r = ring_of[e] as usize;
-        parent[r] = match below {
-            None => None,
-            Some(b) => {
-                let s = ring_of[b as usize];
-                if s == NONE {
-                    None
-                } else {
-                    let s = s as usize;
-                    let eb = &edges[b as usize];
-                    if eb.from < eb.to {
-                        // Material above `b`: r is a hole of the polygon owning s.
-                        debug_assert!(is_hole[r]);
-                        if is_hole[s] {
-                            parent[s]
-                        } else {
-                            Some(s as u32)
-                        }
-                    } else {
-                        // Exterior (or hole space) above `b`.
-                        debug_assert!(!is_hole[r]);
-                        if is_hole[s] {
-                            Some(s as u32)
-                        } else {
-                            parent[s]
-                        }
-                    }
-                }
-            }
-        };
-    });
-    parent
+        .collect()
 }
 
 /// Full pipeline from boundary edges (in sweep order) to a canonical tree.
@@ -355,7 +310,7 @@ pub(crate) fn assemble(edges: Vec<DirEdge>, keep_collinear: bool) -> PolyTree {
         .iter()
         .map(|r| ring_area2(&pts_of(r)) < 0)
         .collect();
-    let parent = nesting(&edges, &rings_idx, &is_hole);
+    let parent = nesting(&edges, &rings_idx);
     let mut rings: Vec<RawRing> = rings_idx
         .iter()
         .map(|r| RawRing {

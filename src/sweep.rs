@@ -9,6 +9,7 @@
 use crate::geom::Point;
 use crate::predicates::{cmp_dir_halfplane, orient, sub};
 use core::cmp::Ordering;
+use core::ops::Range;
 
 /// Orders edges `(lo, hi)` (with `lo < hi`) for [`sweep`]: by `lo`, then bottom to top.
 #[inline]
@@ -57,6 +58,19 @@ impl Status {
             Some(self.last[b - 1])
         } else {
             None
+        }
+    }
+
+    /// Copies the `count` edges starting at `(b, i)` into `out`.
+    fn collect(&self, mut b: usize, mut i: usize, mut count: usize, out: &mut Vec<u32>) {
+        out.clear();
+        while count > 0 && b < self.blocks.len() {
+            let blk = &self.blocks[b];
+            let k = count.min(blk.len() - i.min(blk.len()));
+            out.extend_from_slice(&blk[i..i + k]);
+            count -= k;
+            b += 1;
+            i = 0;
         }
     }
 
@@ -117,10 +131,30 @@ impl Status {
 /// `on_insert(e, below)` is called for every edge, in sweep order and bottom to top at each
 /// vertex, with the edge immediately below it at the moment it is inserted.
 pub(crate) fn sweep(edges: &[(Point, Point)], mut on_insert: impl FnMut(u32, Option<u32>)) {
+    sweep_events(edges, |below, _, starting| {
+        for k in starting.clone() {
+            let bl = if k == starting.start {
+                below
+            } else {
+                Some(k - 1)
+            };
+            on_insert(k, bl);
+        }
+    });
+}
+
+/// Like [`sweep`], with one call per vertex: `on_event(below, ending, starting)` receives
+/// the edge just below the vertex (after removing the edges ending there), the edges ending
+/// at the vertex (bottom to top) and the range of edges starting there (bottom to top).
+pub(crate) fn sweep_events(
+    edges: &[(Point, Point)],
+    mut on_event: impl FnMut(Option<u32>, &[u32], Range<u32>),
+) {
     let n = edges.len();
     let mut his: Vec<Point> = edges.iter().map(|e| e.1).collect();
     his.sort_unstable();
     let mut status = Status::new();
+    let mut ending_buf: Vec<u32> = Vec::new();
     let mut si = 0usize;
     let mut hi = 0usize;
     loop {
@@ -144,11 +178,9 @@ pub(crate) fn sweep(edges: &[(Point, Point)], mut on_insert: impl FnMut(u32, Opt
             h != v && orient(lo, h, v) > 0
         });
         let below = status.before(b, i);
+        status.collect(b, i, ending, &mut ending_buf);
         status.splice(b, i, ending, (s0..si).map(|e| e as u32));
-        for k in s0..si {
-            let bl = if k == s0 { below } else { Some((k - 1) as u32) };
-            on_insert(k as u32, bl);
-        }
+        on_event(below, &ending_buf, s0 as u32..si as u32);
     }
 }
 

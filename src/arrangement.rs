@@ -54,8 +54,24 @@ impl Arrangement {
         Ok(Self::from_frags(input, frags))
     }
 
+    /// Like [`build`](Self::build) with snap rounding, but without computing the winding
+    /// numbers (`below` stays empty): for callers that run their own sweep.
+    pub fn build_unwound(input: &[InEdge]) -> Arrangement {
+        let segs: Vec<(Point, Point)> = input.iter().map(|e| (e.a, e.b)).collect();
+        let frags = snap_round(&segs);
+        drop(segs);
+        Self::merge(input, frags)
+    }
+
     /// Builds the arrangement from already-noded fragments of `input`.
     pub fn from_frags(input: &[InEdge], frags: Vec<Frag>) -> Arrangement {
+        let mut arr = Self::merge(input, frags);
+        arr.wind();
+        arr
+    }
+
+    /// Merges coincident fragments into sorted arrangement edges (no windings yet).
+    fn merge(input: &[InEdge], frags: Vec<Frag>) -> Arrangement {
         struct F {
             lo: Point,
             hi: Point,
@@ -140,6 +156,16 @@ impl Arrangement {
             i = j;
         }
         drop(f);
+        Arrangement {
+            edges,
+            below: Vec::new(),
+            open_frags,
+        }
+    }
+
+    /// Computes the winding numbers below every edge.
+    fn wind(&mut self) {
+        let edges = &self.edges;
         let segs: Vec<(Point, Point)> = edges.iter().map(|e| (e.lo, e.hi)).collect();
         let mut below = vec![[0i32; 2]; edges.len()];
         sweep(&segs, |e, b| {
@@ -151,11 +177,7 @@ impl Arrangement {
                 ];
             }
         });
-        Arrangement {
-            edges,
-            below,
-            open_frags,
-        }
+        self.below = below;
     }
 
     /// Winding numbers below and above edge `k`. For an open fragment lying on a closed
