@@ -626,6 +626,9 @@ pub fn contains<A: Geometry + ?Sized, B: Geometry + ?Sized>(a: &A, b: &B) -> boo
         });
         return !linear && !b.is_areal() && pts.iter().all(|&p| a.locate(p) != Location::Outside);
     }
+    if !b.is_areal() {
+        return linear_inside(a, b);
+    }
     let mut edges: Vec<InEdge> = Vec::new();
     a.visit_segments(&mut |p, q| {
         if p != q {
@@ -667,6 +670,97 @@ pub fn contains<A: Geometry + ?Sized, B: Geometry + ?Sized>(a: &A, b: &B) -> boo
             }
         } else if (in_b(wb) && !in_a(wb)) || (in_b(wa) && !in_a(wa)) {
             return false;
+        }
+    }
+    true
+}
+
+/// Location of the point `m2 / 2` (given in doubled coordinates) relative to the region
+/// bounded by `segs` (even-odd rule over all boundary segments), exactly.
+fn locate_doubled(segs: &[(Point, Point, Rect)], m2: Point) -> Location {
+    let mut inside = false;
+    for &(a, b, _) in segs {
+        let (a, b) = (Point::new(2 * a.x, 2 * a.y), Point::new(2 * b.x, 2 * b.y));
+        if on_segment(a, b, m2) {
+            return Location::OnBoundary;
+        }
+        if (a.y > m2.y) != (b.y > m2.y) {
+            // Crossing of the rightward ray: m2 strictly left of the edge's x at m2.y.
+            let o = orient(a, b, m2);
+            if (o > 0) == (b.y > a.y) {
+                inside = !inside;
+            }
+        }
+    }
+    if inside {
+        Location::Inside
+    } else {
+        Location::Outside
+    }
+}
+
+/// `contains` for an areal `a` and a linear (or point) `b`: no segment of `b` crosses the
+/// boundary of `a` properly, and every piece of `b` between the points where it touches
+/// `a`'s vertices lies in `a`. Crossings of `b` with itself are irrelevant.
+fn linear_inside<A: Geometry + ?Sized, B: Geometry + ?Sized>(a: &A, b: &B) -> bool {
+    let everything = Rect {
+        min: Point::new(i64::MIN, i64::MIN),
+        max: Point::new(i64::MAX, i64::MAX),
+    };
+    let mut sa = collect_segments(a, &everything);
+    let mut sb: Vec<(Point, Point, Rect)> = Vec::new();
+    let mut isolated: Vec<Point> = Vec::new();
+    b.visit_segments(&mut |p, q| {
+        if p == q {
+            isolated.push(p);
+        } else {
+            sb.push((p, q, Rect::new(p, q)));
+        }
+    });
+    if isolated.iter().any(|&p| a.locate(p) == Location::Outside) {
+        return false;
+    }
+    // Split points of each `b` segment: `a` vertices on its interior.
+    let mut touches: Vec<((Point, Point), i128, Point)> = Vec::new();
+    let crossed = any_pair(&mut sa.clone(), &mut sb.clone(), 0, |x, y| {
+        if crate::predicates::segments_cross_properly(x.0, x.1, y.0, y.1) {
+            return true;
+        }
+        for v in [x.0, x.1] {
+            if crate::predicates::in_segment_interior(y.0, y.1, v) {
+                touches.push(((y.0, y.1), crate::predicates::dist2(y.0, v), v));
+            }
+        }
+        false
+    });
+    if crossed {
+        return false;
+    }
+    touches.sort_unstable();
+    touches.dedup();
+    sa.shrink_to_fit();
+    let mut t = 0usize;
+    sb.sort_unstable_by_key(|s| (s.0, s.1));
+    for &(p, q, _) in &sb {
+        while t < touches.len() && touches[t].0 < (p, q) {
+            t += 1;
+        }
+        let mut cur = p;
+        let mut pieces: Vec<(Point, Point)> = Vec::new();
+        while t < touches.len() && touches[t].0 == (p, q) {
+            let v = touches[t].2;
+            if v != cur {
+                pieces.push((cur, v));
+                cur = v;
+            }
+            t += 1;
+        }
+        pieces.push((cur, q));
+        for (u, w) in pieces {
+            let m2 = Point::new(u.x + w.x, u.y + w.y);
+            if locate_doubled(&sa, m2) == Location::Outside {
+                return false;
+            }
         }
     }
     true

@@ -182,3 +182,25 @@ proptest! {
         prop_assert_eq!(total_in, total_out);
     }
 }
+
+proptest! {
+    #[test]
+    fn contains_path_matches_clip(
+        start in (-20i64..20, -20i64..20),
+        steps in prop::collection::vec((any::<bool>(), -15i64..15), 1..6),
+        clip in rects(20, 4),
+    ) {
+        let mut pts = vec![Point::new(start.0, start.1)];
+        for (horiz, d) in steps {
+            let l = *pts.last().unwrap();
+            pts.push(if horiz { Point::new(l.x + d, l.y) } else { Point::new(l.x, l.y + d) });
+        }
+        let path: Path = pts.into_iter().collect();
+        let region = union_all(&clip, FillRule::NonZero).unwrap();
+        if path.windows(2).all(|w| w[0] == w[1]) {
+            return Ok(());
+        }
+        let r = clip_paths(&path, &region, FillRule::NonZero).unwrap();
+        prop_assert_eq!(contains(&region, &path), r.outside.is_empty());
+    }
+}

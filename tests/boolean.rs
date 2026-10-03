@@ -285,3 +285,27 @@ fn valid_input_unchanged() {
         vec![Polygon::from(r)]
     );
 }
+
+#[test]
+fn contains_linear_geometries() {
+    let sq = Ring::from([(0, 0), (10, 0), (10, 10), (0, 10)]);
+    let holed = Polygon::new(
+        sq.clone(),
+        vec![Ring::from([(4, 4), (4, 6), (6, 6), (6, 4)])],
+    );
+    // A self-crossing path well inside: contained (its own crossings are irrelevant).
+    assert!(contains(&sq, &Path::from([(1, 1), (9, 9), (9, 1), (1, 9)])));
+    // Along the boundary and touching corners: contained (closed sets).
+    assert!(contains(&sq, &Path::from([(0, 0), (10, 0), (10, 10)])));
+    // Leaving through the boundary: not contained.
+    assert!(!contains(&sq, &Path::from([(5, 5), (15, 5)])));
+    // Through the hole: not contained; around it: contained.
+    assert!(!contains(&holed, &Path::from([(1, 5), (9, 5)])));
+    assert!(contains(&holed, &Path::from([(1, 1), (9, 1), (9, 9)])));
+    // Touching the hole's corner from outside the hole: contained.
+    assert!(contains(&holed, &Path::from([(2, 2), (4, 4), (2, 6)])));
+    // Running along a hole edge: contained.
+    assert!(contains(&holed, &Path::from([(4, 3), (4, 7)])));
+    // Diagonal across the hole corner region: (4,4) to (6,6) is through the hole.
+    assert!(!contains(&holed, &Path::from([(3, 3), (7, 7)])));
+}
