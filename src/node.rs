@@ -797,18 +797,19 @@ impl<'a> Snap<'a> {
     fn precompute_all(&mut self) {
         let n = self.grid.n_cells();
         let this = &*self;
-        let chunks: Vec<(usize, Vec<(u32, u32, Rel)>, Vec<u32>)> =
-            crate::par::map_ranges(n, |range| {
-                let mut by_d = Vec::new();
-                let mut found = Vec::new();
-                let mut ends = Vec::with_capacity(range.len());
-                let start = range.start;
-                for c in range {
-                    this.leaf_relations(c, &mut by_d, &mut found);
-                    ends.push(found.len() as u32);
-                }
-                (start, found, ends)
-            });
+        // (first leaf, relations of the chunk's leaves, end offset of each leaf's relations)
+        type Chunk = (usize, Vec<(u32, u32, Rel)>, Vec<u32>);
+        let chunks: Vec<Chunk> = crate::par::map_ranges(n, |range| {
+            let mut by_d = Vec::new();
+            let mut found = Vec::new();
+            let mut ends = Vec::with_capacity(range.len());
+            let start = range.start;
+            for c in range {
+                this.leaf_relations(c, &mut by_d, &mut found);
+                ends.push(found.len() as u32);
+            }
+            (start, found, ends)
+        });
         for (start, found, ends) in chunks {
             let mut it = found.into_iter();
             let mut prev = 0u32;
