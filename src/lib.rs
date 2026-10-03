@@ -14,6 +14,7 @@ mod offset;
 pub mod predicates;
 mod query;
 mod sweep;
+mod triangulate;
 mod validate;
 
 pub use arc::{ArcTol, Circle, Contour, Curve, MAX_ARC_VERTICES, Shape, Side};
@@ -29,4 +30,5 @@ pub use query::{
     Geometry, Location, Segment, area2, centroid, contains, intersects, locate, locate_in_polygon,
     locate_in_ring, ring_area2, ring_winding,
 };
+pub use triangulate::{Triangulation, triangulate, triangulate_delaunay, triangulate_set};
 pub use validate::{RingId, ValidityError, check_canonical, validate, validate_set};
