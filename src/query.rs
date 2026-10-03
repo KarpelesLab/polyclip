@@ -222,10 +222,10 @@ impl Geometry for Ring {
 
 /// Location of `p` relative to a polygon (inside its outer ring and outside all holes).
 pub fn locate_in_polygon(poly: &Polygon, p: Point) -> Location {
-    if let Some(b) = poly.outer.bbox() {
-        if !b.contains_point(p) {
-            return Location::Outside;
-        }
+    if let Some(b) = poly.outer.bbox()
+        && !b.contains_point(p)
+    {
+        return Location::Outside;
     }
     match locate_in_ring(&poly.outer.0, p) {
         Location::Inside => {}

@@ -127,8 +127,8 @@ fn distance_bench() {
     let mut pairs = Vec::new();
     for i in 0..shapes.len() {
         let a = boxes[i].expand(200_000);
-        for j in 0..shapes.len() {
-            if i != j && a.intersects(&boxes[j]) {
+        for (j, b) in boxes.iter().enumerate() {
+            if i != j && a.intersects(b) {
                 pairs.push((i, j));
             }
         }

@@ -338,9 +338,9 @@ pub(crate) fn build_tree(mut rings: Vec<RawRing>) -> PolyTree {
     // Canonical order: children sorted by ring vertex sequence; nodes numbered depth-first.
     let mut children: Vec<Vec<u32>> = vec![Vec::new(); m];
     let mut roots: Vec<u32> = Vec::new();
-    for r in 0..m {
-        match parent[r] {
-            Some(p) => children[p as usize].push(r as u32),
+    for (r, par) in parent.iter().enumerate() {
+        match par {
+            Some(p) => children[*p as usize].push(r as u32),
             None => roots.push(r as u32),
         }
     }

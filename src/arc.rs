@@ -385,7 +385,7 @@ fn step_angle(r: f64, tol: ArcTol, convex: bool) -> Result<f64> {
 
 fn segment_count(sweep: f64, step: f64) -> Result<usize> {
     let n = libm::ceil(sweep.abs() / step);
-    if !(n < MAX_ARC_VERTICES as f64) {
+    if n.is_nan() || n >= MAX_ARC_VERTICES as f64 {
         return Err(Error::InvalidParameter(
             "arc tolerance too small for the radius",
         ));

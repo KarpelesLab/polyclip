@@ -43,7 +43,7 @@ impl U384 {
     }
 
     /// Converts to `f64` (rounded).
-    pub fn to_f64(&self) -> f64 {
+    pub fn to_f64(self) -> f64 {
         let mut v = 0f64;
         for i in (0..6).rev() {
             v = v * 18446744073709551616.0 + self.0[i] as f64;

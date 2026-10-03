@@ -65,6 +65,9 @@ impl Op {
     }
 }
 
+/// Callback receiving a vertex sequence and its optional per-edge tags.
+pub type VertexVisitor<'a> = dyn FnMut(&[Point], Option<&[u64]>) + 'a;
+
 /// Anything that can be fed to a boolean operation as a set of closed rings.
 ///
 /// Implemented for [`Ring`], [`Polygon`], [`TaggedRing`], [`TaggedPolygon`], [`PolyTree`],
@@ -72,29 +75,29 @@ impl Op {
 /// orientation, self-intersect and overlap; the fill rule decides what is inside.
 pub trait RingSource {
     /// Calls `f(points, tags)` for every ring. `tags`, when present, has one tag per edge.
-    fn visit_rings(&self, f: &mut dyn FnMut(&[Point], Option<&[u64]>));
+    fn visit_rings(&self, f: &mut VertexVisitor<'_>);
 }
 
 impl RingSource for Ring {
-    fn visit_rings(&self, f: &mut dyn FnMut(&[Point], Option<&[u64]>)) {
+    fn visit_rings(&self, f: &mut VertexVisitor<'_>) {
         f(&self.0, None)
     }
 }
 
 impl RingSource for Vec<Point> {
-    fn visit_rings(&self, f: &mut dyn FnMut(&[Point], Option<&[u64]>)) {
+    fn visit_rings(&self, f: &mut VertexVisitor<'_>) {
         f(self, None)
     }
 }
 
 impl RingSource for TaggedRing {
-    fn visit_rings(&self, f: &mut dyn FnMut(&[Point], Option<&[u64]>)) {
+    fn visit_rings(&self, f: &mut VertexVisitor<'_>) {
         f(&self.points, Some(&self.tags))
     }
 }
 
 impl RingSource for Polygon {
-    fn visit_rings(&self, f: &mut dyn FnMut(&[Point], Option<&[u64]>)) {
+    fn visit_rings(&self, f: &mut VertexVisitor<'_>) {
         for r in self.rings() {
             f(&r.0, None)
         }
@@ -102,7 +105,7 @@ impl RingSource for Polygon {
 }
 
 impl RingSource for TaggedPolygon {
-    fn visit_rings(&self, f: &mut dyn FnMut(&[Point], Option<&[u64]>)) {
+    fn visit_rings(&self, f: &mut VertexVisitor<'_>) {
         f(&self.outer.points, Some(&self.outer.tags));
         for h in &self.holes {
             f(&h.points, Some(&h.tags));
@@ -111,7 +114,7 @@ impl RingSource for TaggedPolygon {
 }
 
 impl RingSource for PolyTree {
-    fn visit_rings(&self, f: &mut dyn FnMut(&[Point], Option<&[u64]>)) {
+    fn visit_rings(&self, f: &mut VertexVisitor<'_>) {
         for n in &self.nodes {
             f(&n.ring.0, Some(&n.tags))
         }
@@ -119,7 +122,7 @@ impl RingSource for PolyTree {
 }
 
 impl<T: RingSource> RingSource for [T] {
-    fn visit_rings(&self, f: &mut dyn FnMut(&[Point], Option<&[u64]>)) {
+    fn visit_rings(&self, f: &mut VertexVisitor<'_>) {
         for x in self {
             x.visit_rings(f)
         }
@@ -127,19 +130,19 @@ impl<T: RingSource> RingSource for [T] {
 }
 
 impl<T: RingSource> RingSource for Vec<T> {
-    fn visit_rings(&self, f: &mut dyn FnMut(&[Point], Option<&[u64]>)) {
+    fn visit_rings(&self, f: &mut VertexVisitor<'_>) {
         self.as_slice().visit_rings(f)
     }
 }
 
 impl<T: RingSource, const N: usize> RingSource for [T; N] {
-    fn visit_rings(&self, f: &mut dyn FnMut(&[Point], Option<&[u64]>)) {
+    fn visit_rings(&self, f: &mut VertexVisitor<'_>) {
         self.as_slice().visit_rings(f)
     }
 }
 
 impl<T: RingSource + ?Sized> RingSource for &T {
-    fn visit_rings(&self, f: &mut dyn FnMut(&[Point], Option<&[u64]>)) {
+    fn visit_rings(&self, f: &mut VertexVisitor<'_>) {
         (**self).visit_rings(f)
     }
 }
@@ -257,10 +260,10 @@ impl Boolean {
         let error = &mut self.error;
         rings.visit_rings(&mut |pts, tags| {
             let n = pts.len();
-            if error.is_none() {
-                if let Some(&p) = pts.iter().find(|p| !p.in_range()) {
-                    *error = Some(Error::CoordinateOutOfRange(p));
-                }
+            if error.is_none()
+                && let Some(&p) = pts.iter().find(|p| !p.in_range())
+            {
+                *error = Some(Error::CoordinateOutOfRange(p));
             }
             for i in 0..n {
                 let a = pts[i];
@@ -384,23 +387,23 @@ impl ClippedPaths {
 /// Anything that can be clipped as a set of open paths.
 pub trait PathSource {
     /// Calls `f(points, tags)` for every path. `tags`, when present, has one tag per edge.
-    fn visit_paths(&self, f: &mut dyn FnMut(&[Point], Option<&[u64]>));
+    fn visit_paths(&self, f: &mut VertexVisitor<'_>);
 }
 
 impl PathSource for Path {
-    fn visit_paths(&self, f: &mut dyn FnMut(&[Point], Option<&[u64]>)) {
+    fn visit_paths(&self, f: &mut VertexVisitor<'_>) {
         f(&self.0, None)
     }
 }
 
 impl PathSource for TaggedPath {
-    fn visit_paths(&self, f: &mut dyn FnMut(&[Point], Option<&[u64]>)) {
+    fn visit_paths(&self, f: &mut VertexVisitor<'_>) {
         f(&self.points, Some(&self.tags))
     }
 }
 
 impl<T: PathSource> PathSource for [T] {
-    fn visit_paths(&self, f: &mut dyn FnMut(&[Point], Option<&[u64]>)) {
+    fn visit_paths(&self, f: &mut VertexVisitor<'_>) {
         for x in self {
             x.visit_paths(f)
         }
@@ -408,13 +411,13 @@ impl<T: PathSource> PathSource for [T] {
 }
 
 impl<T: PathSource> PathSource for Vec<T> {
-    fn visit_paths(&self, f: &mut dyn FnMut(&[Point], Option<&[u64]>)) {
+    fn visit_paths(&self, f: &mut VertexVisitor<'_>) {
         self.as_slice().visit_paths(f)
     }
 }
 
 impl<T: PathSource + ?Sized> PathSource for &T {
-    fn visit_paths(&self, f: &mut dyn FnMut(&[Point], Option<&[u64]>)) {
+    fn visit_paths(&self, f: &mut VertexVisitor<'_>) {
         (**self).visit_paths(f)
     }
 }
@@ -454,10 +457,10 @@ pub fn clip_paths(
         path_starts.push(edges.len());
         for (i, w) in pts.windows(2).enumerate() {
             for p in w {
-                if err.is_none() {
-                    if let Err(e) = check_point(*p) {
-                        err = Some(e);
-                    }
+                if err.is_none()
+                    && let Err(e) = check_point(*p)
+                {
+                    err = Some(e);
                 }
             }
             if w[0] != w[1] {
