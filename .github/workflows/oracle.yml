@@ -1,0 +1,45 @@
+name: Oracle
+
+# Differential tests against Clipper2 (C++, built by clipper2c-sys) in the
+# standalone `oracle/` crate. Clipper2 is a test oracle only and never a
+# dependency of the library; this job keeps the comparison running.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  differential:
+    name: polyclip vs Clipper2
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: oracle
+
+      - name: Differential tests
+        working-directory: oracle
+        run: cargo test --release -- --nocapture
+
+      # Smoke-run the timing comparison on a small size so it keeps working.
+      - name: Timing comparison (smoke)
+        working-directory: oracle
+        run: cargo run --release --example timing -- 2000

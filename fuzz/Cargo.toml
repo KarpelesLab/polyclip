@@ -1,0 +1,96 @@
+# cargo-fuzz workspace for polyclip.
+#
+# Runs under nightly Rust with libFuzzer instrumentation. The main crate's
+# stable-Rust CI does not touch this directory; the dedicated
+# `.github/workflows/fuzz.yml` workflow runs the targets here on a weekly
+# schedule and on manual dispatch.
+#
+# Local use:
+#   cargo +nightly fuzz run <target> -- -max_total_time=60
+#
+# See `fuzz/README.md` for the input model, triage and corpus conventions.
+
+[package]
+name = "polyclip-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Standalone workspace root. The parent crate's `workspace.exclude = ["fuzz"]`
+# already keeps this out of the main workspace when building from the
+# canonical checkout, but cargo's upward manifest search can still capture us
+# into an *outer* workspace when this repo is checked out nested (e.g. a git
+# worktree under another clone). The empty table pins the boundary here.
+[workspace]
+
+[lib]
+# Shared byte -> geometry decoding (`polyclip_fuzz::Gen`) used by every target.
+path = "src/lib.rs"
+test = false
+doc = false
+bench = false
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = "1"
+polyclip = { path = ".." }
+
+# Optimised debug info so libFuzzer's stack traces stay useful.
+[profile.release]
+debug = 1
+
+# --- one entry per fuzz target. cargo-fuzz also auto-discovers
+# fuzz_targets/*.rs, but listing them explicitly keeps `cargo fuzz list`
+# stable and avoids surprises from stray scratch files.
+
+[[bin]]
+name = "boolean"
+path = "fuzz_targets/boolean.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "clip_paths"
+path = "fuzz_targets/clip_paths.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "offset"
+path = "fuzz_targets/offset.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "offset_paths"
+path = "fuzz_targets/offset_paths.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "arc"
+path = "fuzz_targets/arc.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "query"
+path = "fuzz_targets/query.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "validate"
+path = "fuzz_targets/validate.rs"
+test = false
+doc = false
+bench = false

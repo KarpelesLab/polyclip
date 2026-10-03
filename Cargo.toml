@@ -1,7 +1,9 @@
 # The cargo-fuzz crate under `fuzz/` (nightly + libFuzzer) is built separately
-# with `cargo +nightly fuzz run <target>`; keep it out of the implicit workspace.
+# with `cargo +nightly fuzz run <target>`, and `oracle/` (differential tests against
+# Clipper2, which needs a C++ compiler) is its own crate too; keep both out of the
+# implicit workspace.
 [workspace]
-exclude = ["fuzz"]
+exclude = ["fuzz", "oracle"]
 
 [package]
 name = "polyclip"
@@ -13,7 +15,7 @@ repository = "https://github.com/KarpelesLab/polyclip"
 license = "MIT"
 keywords = ["polygon", "clipping", "geometry", "offset", "boolean"]
 categories = ["algorithms", "graphics", "mathematics"]
-exclude = [".github", "fuzz", "testdata"]
+exclude = [".github", "fuzz", "oracle", "testdata"]
 
 [package.metadata.docs.rs]
 all-features = true
@@ -30,6 +32,12 @@ serde = { version = "1", features = ["derive"], optional = true }
 
 [dev-dependencies]
 proptest = { version = "1", default-features = false, features = ["std"] }
+# Benchmarks only (never a library dependency). 0.8 needs Rust 1.86, within our MSRV.
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "workloads"
+harness = false
 
 [profile.release]
 debug = "line-tables-only"
