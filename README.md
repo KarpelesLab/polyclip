@@ -74,9 +74,9 @@ Single thread unless noted, Apple Silicon laptop, release build (`cargo bench`,
 
 | Workload | polyclip | with `rayon` | Clipper2 (C++) |
 |---|---|---|---|
-| zone 100 mm × 100 mm − 5 000 inflated obstacles | ~55–62 ms | ~48 ms | ~41 ms |
+| zone 100 mm × 100 mm − 5 000 inflated obstacles | ~49 ms | ~40 ms | ~41 ms |
 | union of 50 000 heavily overlapping 64-vertex circles | ~3.4 s | ~2.4 s | ~157 s |
-| offset of a 10 000-vertex polygon (round joins), convex | ~9.4 ms | | ~0.9 ms |
+| offset of a 10 000-vertex polygon (round joins), convex | ~8.9 ms | | ~0.9 ms |
 | offset of a 10 000-vertex wavy star | ~21 ms | | |
 | `distance_less_than`, 64-vertex polygons (average incl. bbox rejection) | ~80 ns | | |
 | fracture of the zone result (3 672 holes) | ~10 ms | | |
