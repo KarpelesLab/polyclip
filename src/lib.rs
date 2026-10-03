@@ -7,6 +7,7 @@ mod arc;
 mod arrangement;
 mod assemble;
 mod boolean;
+mod distance;
 mod error;
 mod geom;
 mod node;
@@ -15,11 +16,13 @@ pub mod predicates;
 mod query;
 mod sweep;
 mod validate;
+mod wide;
 
 pub use arc::{ArcTol, Circle, Contour, Curve, MAX_ARC_VERTICES, Shape, Side};
 pub use boolean::{
     Boolean, ClippedPaths, FillRule, Op, PathSource, RingSource, boolean, clip_paths, union_all,
 };
+pub use distance::{Closest, SqDist, distance, distance_less_than, distance_sq};
 pub use error::{Error, Result};
 pub use geom::*;
 pub use offset::{

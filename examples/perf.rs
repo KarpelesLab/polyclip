@@ -21,6 +21,10 @@ fn circle(cx: i64, cy: i64, r: f64, n: usize) -> Ring {
 }
 
 fn main() {
+    if std::env::args().any(|a| a == "dist") {
+        distance_bench();
+        return;
+    }
     let mut s = 42u64;
     let n: usize = std::env::args()
         .nth(1)
@@ -77,5 +81,58 @@ fn main() {
         "offset 10k-vertex polygon: {:?} -> {} verts",
         t.elapsed(),
         o[0].outer.len()
+    );
+}
+
+#[allow(dead_code)]
+fn distance_bench() {
+    let mut s = 7u64;
+    let shapes: Vec<Ring> = (0..2000)
+        .map(|_| {
+            circle(
+                (lcg(&mut s) % 10_000_000) as i64,
+                (lcg(&mut s) % 10_000_000) as i64,
+                300_000.0,
+                64,
+            )
+        })
+        .collect();
+    let t = Instant::now();
+    let mut hits = 0;
+    let mut n = 0;
+    for i in 0..shapes.len() {
+        for j in (i + 1)..shapes.len().min(i + 200) {
+            n += 1;
+            if distance_less_than(&shapes[i], &shapes[j], 200_000) {
+                hits += 1;
+            }
+        }
+    }
+    let e = t.elapsed();
+    println!(
+        "distance_less_than: {} queries, {} hits, {:?}/query",
+        n,
+        hits,
+        e / n as u32
+    );
+    // Near pairs only (bboxes overlap).
+    let boxes: Vec<Rect> = shapes.iter().map(|s| s.bbox().unwrap()).collect();
+    let mut pairs = Vec::new();
+    for i in 0..shapes.len() {
+        let a = boxes[i].expand(200_000);
+        for j in 0..shapes.len() {
+            if i != j && a.intersects(&boxes[j]) {
+                pairs.push((i, j));
+            }
+        }
+    }
+    let t = Instant::now();
+    for &(i, j) in &pairs {
+        std::hint::black_box(distance_less_than(&shapes[i], &shapes[j], 200_000));
+    }
+    println!(
+        "distance_less_than near pairs: {} queries, {:?}/query",
+        pairs.len(),
+        t.elapsed() / pairs.len().max(1) as u32
     );
 }
