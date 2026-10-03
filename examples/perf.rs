@@ -21,6 +21,77 @@ fn circle(cx: i64, cy: i64, r: f64, n: usize) -> Ring {
 }
 
 fn main() {
+    if std::env::args().any(|a| a == "wide") {
+        if std::env::var("PITCH").is_ok() {
+            return diag_only();
+        }
+        let slots: Vec<Ring> = (0..50_000i64)
+            .map(|i| {
+                Ring::from([
+                    (0, 20 * i),
+                    (1_000_000, 20 * i),
+                    (1_000_000, 20 * i + 10),
+                    (0, 20 * i + 10),
+                ])
+            })
+            .collect();
+        let t = Instant::now();
+        let u = union_all(&slots, FillRule::NonZero).unwrap();
+        println!(
+            "union of 50k stacked slots: {:?} -> {}",
+            t.elapsed(),
+            u.len()
+        );
+        // The same, rotated by 45 degrees (no axis separates the segments).
+        let pitch: i64 = std::env::var("PITCH")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(20);
+        let diag: Vec<Ring> = (0..50_000i64)
+            .map(|i| {
+                let (x, y) = (pitch * i, -pitch * i);
+                Ring::from([
+                    (x, y),
+                    (x + 700_000, y + 700_000),
+                    (x + 700_010, y + 699_990),
+                    (x + 10, y - 10),
+                ])
+            })
+            .collect();
+        let t = Instant::now();
+        let u = union_all(&diag, FillRule::NonZero).unwrap();
+        println!(
+            "union of 50k diagonal slots: {:?} -> {}",
+            t.elapsed(),
+            u.len()
+        );
+        return;
+    }
+    if std::env::args().any(|a| a == "zone") {
+        let mut s = 42u64;
+        let zone = Ring::from([
+            (0, 0),
+            (100_000_000, 0),
+            (100_000_000, 100_000_000),
+            (0, 100_000_000),
+        ]);
+        let obst: Vec<Ring> = (0..5000)
+            .map(|_| {
+                circle(
+                    (lcg(&mut s) % 100_000_000) as i64,
+                    (lcg(&mut s) % 100_000_000) as i64,
+                    300_000.0,
+                    32,
+                )
+            })
+            .collect();
+        let t = Instant::now();
+        for _ in 0..20 {
+            std::hint::black_box(boolean(Op::Difference, &zone, &obst, FillRule::NonZero).unwrap());
+        }
+        println!("zone x20: {:?}", t.elapsed() / 20);
+        return;
+    }
     if std::env::args().any(|a| a == "dist") {
         distance_bench();
         return;
@@ -88,6 +159,28 @@ fn main() {
         "offset 10k-vertex polygon: {:?} -> {} verts",
         t.elapsed(),
         o[0].outer.len()
+    );
+}
+
+fn diag_only() {
+    let pitch: i64 = std::env::var("PITCH").unwrap().parse().unwrap();
+    let diag: Vec<Ring> = (0..20_000i64)
+        .map(|i| {
+            let (x, y) = (pitch * i, -pitch * i);
+            Ring::from([
+                (x, y),
+                (x + 700_000, y + 700_000),
+                (x + 700_100, y + 699_900),
+                (x + 100, y - 100),
+            ])
+        })
+        .collect();
+    let t = Instant::now();
+    let u = union_all(&diag, FillRule::NonZero).unwrap();
+    println!(
+        "union of 20k diagonal tracks, pitch {pitch}: {:?} -> {}",
+        t.elapsed(),
+        u.len()
     );
 }
 

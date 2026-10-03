@@ -17,6 +17,100 @@ pub(crate) fn cmp_sweep_edges(a: (Point, Point), b: (Point, Point)) -> Ordering 
         .then_with(|| cmp_dir_halfplane(sub(a.1, a.0), sub(b.1, b.0)))
 }
 
+/// Sweep status: the active edges bottom to top, split into blocks of bounded size so that
+/// insertions and removals stay cheap however wide the status grows. `last[b]` mirrors the
+/// last edge of block `b` in a dense array for the top-level binary search.
+struct Status {
+    blocks: Vec<Vec<u32>>,
+    last: Vec<u32>,
+}
+
+const BLOCK: usize = 256;
+
+impl Status {
+    fn new() -> Self {
+        Status {
+            blocks: Vec::new(),
+            last: Vec::new(),
+        }
+    }
+
+    /// Position `(block, index)` of the first edge for which `below` is false.
+    #[inline]
+    fn find(&self, below: impl Fn(u32) -> bool) -> (usize, usize) {
+        let b = self.last.partition_point(|&e| below(e));
+        if b == self.blocks.len() {
+            return match self.blocks.last() {
+                Some(l) => (b - 1, l.len()),
+                None => (0, 0),
+            };
+        }
+        (b, self.blocks[b].partition_point(|&e| below(e)))
+    }
+
+    /// The edge just before position `(b, i)`.
+    #[inline]
+    fn before(&self, b: usize, i: usize) -> Option<u32> {
+        if i > 0 {
+            Some(self.blocks[b][i - 1])
+        } else if b > 0 {
+            Some(self.last[b - 1])
+        } else {
+            None
+        }
+    }
+
+    /// Removes `remove` edges at `(b, i)` and inserts `insert` there.
+    fn splice(
+        &mut self,
+        b: usize,
+        i: usize,
+        mut remove: usize,
+        insert: impl ExactSizeIterator<Item = u32>,
+    ) {
+        if self.blocks.is_empty() {
+            if insert.len() == 0 {
+                return;
+            }
+            self.blocks.push(Vec::with_capacity(2 * BLOCK));
+            self.last.push(0);
+        }
+        // Remove (possibly spilling into following blocks).
+        let mut bb = b;
+        let mut ii = i;
+        while remove > 0 && bb < self.blocks.len() {
+            let blk = &mut self.blocks[bb];
+            let k = remove.min(blk.len() - ii);
+            blk.drain(ii..ii + k);
+            remove -= k;
+            bb += 1;
+            ii = 0;
+        }
+        let blk = &mut self.blocks[b];
+        let i = i.min(blk.len());
+        blk.splice(i..i, insert);
+        if blk.len() > 2 * BLOCK {
+            let tail = blk.split_off(BLOCK);
+            self.blocks.insert(b + 1, tail);
+            self.last.insert(b + 1, 0);
+        }
+        // Refresh `last` for touched blocks and drop empty ones.
+        let end = bb.max(b + 2).min(self.blocks.len());
+        let mut k = b;
+        let mut end = end;
+        while k < end {
+            if self.blocks[k].is_empty() {
+                self.blocks.remove(k);
+                self.last.remove(k);
+                end -= 1;
+            } else {
+                self.last[k] = *self.blocks[k].last().unwrap();
+                k += 1;
+            }
+        }
+    }
+}
+
 /// Runs the sweep. `edges[i] = (lo, hi)` with `lo < hi`, sorted by [`cmp_sweep_edges`],
 /// pairwise non-crossing, with no vertex on another edge's interior.
 ///
@@ -26,7 +120,7 @@ pub(crate) fn sweep(edges: &[(Point, Point)], mut on_insert: impl FnMut(u32, Opt
     let n = edges.len();
     let mut his: Vec<Point> = edges.iter().map(|e| e.1).collect();
     his.sort_unstable();
-    let mut status: Vec<u32> = Vec::new();
+    let mut status = Status::new();
     let mut si = 0usize;
     let mut hi = 0usize;
     loop {
@@ -45,23 +139,15 @@ pub(crate) fn sweep(edges: &[(Point, Point)], mut on_insert: impl FnMut(u32, Opt
         while si < n && edges[si].0 == v {
             si += 1;
         }
-        let pos = status.partition_point(|&e| {
+        let (b, i) = status.find(|e| {
             let (lo, h) = edges[e as usize];
             h != v && orient(lo, h, v) > 0
         });
-        let end = (pos + ending).min(status.len());
-        debug_assert!(
-            status[pos..end].iter().all(|&e| edges[e as usize].1 == v),
-            "sweep: non-noded input"
-        );
-        status.splice(pos..end, (s0..si).map(|e| e as u32));
+        let below = status.before(b, i);
+        status.splice(b, i, ending, (s0..si).map(|e| e as u32));
         for k in s0..si {
-            let below = if k == s0 {
-                if pos > 0 { Some(status[pos - 1]) } else { None }
-            } else {
-                Some((k - 1) as u32)
-            };
-            on_insert(k as u32, below);
+            let bl = if k == s0 { below } else { Some((k - 1) as u32) };
+            on_insert(k as u32, bl);
         }
     }
 }

@@ -18,7 +18,8 @@
 
 use crate::geom::{Point, Rect};
 use crate::predicates::{
-    dot, floor_div, in_segment_interior, orient, segment_pixel_entry, segments_cross_properly, sub,
+    dot, floor_div, in_segment_interior, orient, segment_meets_rect, segment_pixel_entry,
+    segments_cross_properly, sub,
 };
 
 /// A fragment of input segment `src`, from `a` to `b` (same direction as the source).
@@ -29,17 +30,19 @@ pub(crate) struct Frag {
     pub src: u32,
 }
 
-/// Uniform grid of half-open square cells `[x0 + i*s, x0 + (i+1)*s) x [...]`.
+/// Adaptive k-d partition of the plane into leaves with half-open integer regions
+/// `[lo, hi)`. A segment is listed in every leaf whose region, grown by one unit on every
+/// side, it meets — so any two segments passing within distance 1 of an integer point of a
+/// leaf are both listed in that leaf. Splits adapt to the data (long, dense or parallel
+/// segments included), which a uniform grid cannot do.
 struct Grid {
-    x0: i64,
-    y0: i64,
-    s: i64,
-    nx: usize,
-    ny: usize,
-    /// `items[start[c]..start[c + 1]]` are the segments of cell `c`.
+    leaves: Vec<(Point, Point)>,
     start: Vec<u32>,
     items: Vec<u32>,
 }
+
+const LEAF_SIZE: usize = 48;
+const MAX_DEPTH: u32 = 48;
 
 #[inline]
 fn seg_bbox(s: &(Point, Point)) -> Rect {
@@ -65,19 +68,22 @@ fn csr<T: Copy + Default>(n_keys: usize, pairs: &[(u32, T)]) -> (Vec<u32>, Vec<T
     (start, out)
 }
 
+#[inline]
+fn coord(p: Point, axis: u8) -> i64 {
+    if axis == 0 { p.x } else { p.y }
+}
+
 impl Grid {
+    /// A uniform grid when the data suits one (segments short relative to their spacing,
+    /// little duplication), else an adaptive k-d partition.
     fn build(segs: &[(Point, Point)], bboxes: &[Rect]) -> Grid {
-        let Some(bb) = bboxes.iter().copied().reduce(|a, b| a.union(&b)) else {
-            return Grid {
-                x0: 0,
-                y0: 0,
-                s: 1,
-                nx: 1,
-                ny: 1,
-                start: vec![0, 0],
-                items: Vec::new(),
-            };
-        };
+        Self::build_uniform(segs, bboxes).unwrap_or_else(|| Self::build_kd(segs, bboxes))
+    }
+
+    /// Uniform grid of square cells sized after the typical segment extent. Returns `None`
+    /// when segments would be listed in too many cells (long or dense parallel segments).
+    fn build_uniform(segs: &[(Point, Point)], bboxes: &[Rect]) -> Option<Grid> {
+        let bb = bboxes.iter().copied().reduce(|a, b| a.union(&b))?;
         let n = segs.len();
         let w = (bb.max.x - bb.min.x + 1) as f64;
         let h = (bb.max.y - bb.min.y + 1) as f64;
@@ -92,32 +98,25 @@ impl Grid {
         let typical = *ext.select_nth_unstable(mid).1;
         // At most about one cell per segment.
         let s_min = libm::ceil(libm::sqrt(w * h / (n as f64 + 16.0)));
-        let s = (typical as f64).max(s_min).max(1.0).min(w.max(h));
-        let s = s as i64;
+        let s = (typical as f64).max(s_min).max(1.0).min(w.max(h)) as i64;
         let nx = ((bb.max.x - bb.min.x) / s + 1) as usize;
         let ny = ((bb.max.y - bb.min.y) / s + 1) as usize;
-        let mut g = Grid {
-            x0: bb.min.x,
-            y0: bb.min.y,
-            s,
-            nx,
-            ny,
-            start: Vec::new(),
-            items: Vec::new(),
-        };
-        let mut pairs: Vec<(u32, u32)> = Vec::with_capacity(n * 2);
-        for (i, (sg, b)) in segs.iter().zip(bboxes).enumerate() {
-            let i = i as u32;
-            let (cx0, cx1) = (g.col(b.min.x - 1), g.col(b.max.x + 1));
-            let (cy0, cy1) = (g.row(b.min.y - 1), g.row(b.max.y + 1));
+        let (x0, y0) = (bb.min.x, bb.min.y);
+        let col = |x: i64| ((x - x0).div_euclid(s)).clamp(0, nx as i64 - 1) as usize;
+        let row = |y: i64| ((y - y0).div_euclid(s)).clamp(0, ny as i64 - 1) as usize;
+        // Cells of segment `i`: (columns, rows per column) with the long-diagonal refinement.
+        let cells = |i: usize, f: &mut dyn FnMut(usize, usize)| {
+            let (sg, b) = (&segs[i], &bboxes[i]);
+            let (cx0, cx1) = (col(b.min.x - 1), col(b.max.x + 1));
+            let (cy0, cy1) = (row(b.min.y - 1), row(b.max.y + 1));
             // Short or axis-parallel segments: the whole (grown) bounding box of cells.
             if cx1 - cx0 <= 2 || cy1 - cy0 <= 2 || sg.0.x == sg.1.x || sg.0.y == sg.1.y {
                 for cy in cy0..=cy1 {
                     for cx in cx0..=cx1 {
-                        pairs.push(((cy * g.nx + cx) as u32, i));
+                        f(cx, cy);
                     }
                 }
-                continue;
+                return;
             }
             // Long diagonal segment: per column, the rows its (grown) trace covers.
             let (a, c) = if sg.0.x <= sg.1.x {
@@ -127,42 +126,196 @@ impl Grid {
             };
             let slope = (c.y - a.y) as f64 / (c.x - a.x) as f64;
             for cx in cx0..=cx1 {
-                let xa = (g.x0 + cx as i64 * s - 1).clamp(a.x, c.x);
-                let xb = (g.x0 + (cx as i64 + 1) * s).clamp(a.x, c.x);
+                let xa = (x0 + cx as i64 * s - 1).clamp(a.x, c.x);
+                let xb = (x0 + (cx as i64 + 1) * s).clamp(a.x, c.x);
                 let ya = a.y as f64 + (xa - a.x) as f64 * slope;
                 let yb = a.y as f64 + (xb - a.x) as f64 * slope;
                 let lo = libm::floor(ya.min(yb)) as i64 - 2;
                 let hi = libm::ceil(ya.max(yb)) as i64 + 2;
-                let (r0, r1) = (g.row(lo).max(cy0), g.row(hi).min(cy1));
-                for cy in r0..=r1 {
-                    pairs.push(((cy * g.nx + cx) as u32, i));
+                for cy in row(lo).max(cy0)..=row(hi).min(cy1) {
+                    f(cx, cy);
                 }
             }
+        };
+        // Budget check before building anything.
+        let budget = 6 * n + 1024;
+        let mut count = 0usize;
+        for i in 0..n {
+            cells(i, &mut |_, _| count += 1);
+            if count > budget {
+                return None;
+            }
         }
-        let (start, items) = csr(g.nx * g.ny, &pairs);
-        g.start = start;
-        g.items = items;
+        let mut pairs: Vec<(u32, u32)> = Vec::with_capacity(count);
+        for i in 0..n {
+            cells(i, &mut |cx, cy| {
+                pairs.push(((cy * nx + cx) as u32, i as u32))
+            });
+        }
+        let (start, items) = csr(nx * ny, &pairs);
+        // Too dense somewhere: the adaptive partition will do better.
+        if start.windows(2).any(|w| w[1] - w[0] > 256) {
+            return None;
+        }
+        let mut leaves = Vec::with_capacity(nx * ny);
+        for cy in 0..ny as i64 {
+            for cx in 0..nx as i64 {
+                let lo = Point::new(x0 + cx * s, y0 + cy * s);
+                leaves.push((lo, Point::new(lo.x + s, lo.y + s)));
+            }
+        }
+        Some(Grid {
+            leaves,
+            start,
+            items,
+        })
+    }
+
+    fn build_kd(segs: &[(Point, Point)], bboxes: &[Rect]) -> Grid {
+        let mut g = Grid {
+            leaves: Vec::new(),
+            start: vec![0],
+            items: Vec::new(),
+        };
+        let Some(bb) = bboxes.iter().copied().reduce(|a, b| a.union(&b)) else {
+            g.leaves.push((Point::new(0, 0), Point::new(1, 1)));
+            g.start.push(0);
+            return g;
+        };
+        let lo = bb.min;
+        let hi = Point::new(bb.max.x + 1, bb.max.y + 1);
+        let all: Vec<u32> = (0..segs.len() as u32).collect();
+        let mut stack: Vec<(Vec<u32>, Point, Point, u32)> = vec![(all, lo, hi, 0)];
+        let mut sample: Vec<i64> = Vec::new();
+        while let Some((items, lo, hi, depth)) = stack.pop() {
+            if items.len() > LEAF_SIZE
+                && depth < MAX_DEPTH
+                && let Some((axis, at, left, right)) =
+                    Self::split(segs, bboxes, &items, lo, hi, &mut sample)
+            {
+                let (lhi, rlo) = if axis == 0 {
+                    (Point::new(at, hi.y), Point::new(at, lo.y))
+                } else {
+                    (Point::new(hi.x, at), Point::new(lo.x, at))
+                };
+                drop(items);
+                stack.push((right, rlo, hi, depth + 1));
+                stack.push((left, lo, lhi, depth + 1));
+                continue;
+            }
+            g.items.extend_from_slice(&items);
+            g.start.push(g.items.len() as u32);
+            g.leaves.push((lo, hi));
+        }
         g
     }
 
-    #[inline]
-    fn col(&self, x: i64) -> usize {
-        ((x - self.x0).div_euclid(self.s)).clamp(0, self.nx as i64 - 1) as usize
-    }
-
-    #[inline]
-    fn row(&self, y: i64) -> usize {
-        ((y - self.y0).div_euclid(self.s)).clamp(0, self.ny as i64 - 1) as usize
-    }
-
-    #[inline]
-    fn cell(&self, p: Point) -> usize {
-        self.row(p.y) * self.nx + self.col(p.x)
+    /// Chooses a split of the region `[lo, hi)` and distributes the items, or `None` when no
+    /// split makes progress.
+    #[allow(clippy::type_complexity)]
+    fn split(
+        segs: &[(Point, Point)],
+        bboxes: &[Rect],
+        items: &[u32],
+        lo: Point,
+        hi: Point,
+        sample: &mut Vec<i64>,
+    ) -> Option<(u8, i64, Vec<u32>, Vec<u32>)> {
+        let n = items.len();
+        let stride = (n / 64).max(1);
+        let mut best: Option<(usize, u8, i64)> = None;
+        for axis in [0u8, 1u8] {
+            let (l, h) = (coord(lo, axis), coord(hi, axis));
+            if h - l < 2 {
+                continue;
+            }
+            sample.clear();
+            sample.extend(items.iter().step_by(stride).map(|&i| {
+                let b = &bboxes[i as usize];
+                let (a, c) = (coord(b.min, axis), coord(b.max, axis));
+                a + (c - a) / 2
+            }));
+            let mid = sample.len() / 2;
+            let mut at = *sample.select_nth_unstable(mid).1;
+            if at <= l || at >= h {
+                at = l + (h - l) / 2;
+            }
+            let at = at.clamp(l + 1, h - 1);
+            // Straddlers in the sample (bounding box reaching both children).
+            let straddle = items
+                .iter()
+                .step_by(stride)
+                .filter(|&&i| {
+                    let b = &bboxes[i as usize];
+                    coord(b.min, axis) <= at && coord(b.max, axis) >= at - 1
+                })
+                .count();
+            if best.is_none_or(|(s, _, _)| straddle < s) {
+                best = Some((straddle, axis, at));
+            }
+        }
+        let (_, axis, at) = best?;
+        // Child rectangles grown by one unit (closed): left covers [lo - 1, at], right
+        // [at - 1, hi] along the axis.
+        let (lrect, rrect) = if axis == 0 {
+            (
+                Rect {
+                    min: Point::new(lo.x - 1, lo.y - 1),
+                    max: Point::new(at, hi.y),
+                },
+                Rect {
+                    min: Point::new(at - 1, lo.y - 1),
+                    max: hi,
+                },
+            )
+        } else {
+            (
+                Rect {
+                    min: Point::new(lo.x - 1, lo.y - 1),
+                    max: Point::new(hi.x, at),
+                },
+                Rect {
+                    min: Point::new(lo.x - 1, at - 1),
+                    max: hi,
+                },
+            )
+        };
+        let mut left = Vec::with_capacity(n / 2 + 4);
+        let mut right = Vec::with_capacity(n / 2 + 4);
+        for &i in items {
+            let b = &bboxes[i as usize];
+            let (bmin, bmax) = (coord(b.min, axis), coord(b.max, axis));
+            if bmax < at - 1 {
+                left.push(i);
+            } else if bmin > at {
+                right.push(i);
+            } else {
+                let s = &segs[i as usize];
+                if segment_meets_rect(s.0, s.1, &lrect) {
+                    left.push(i);
+                }
+                if segment_meets_rect(s.0, s.1, &rrect) {
+                    right.push(i);
+                }
+            }
+        }
+        // No progress: most items went to both sides.
+        if (left.len() + right.len()) * 10 > n * 15 {
+            return None;
+        }
+        Some((axis, at, left, right))
     }
 
     #[inline]
     fn n_cells(&self) -> usize {
-        self.nx * self.ny
+        self.leaves.len()
+    }
+
+    /// `true` when `p` lies in leaf `c`'s half-open region.
+    #[inline]
+    fn in_leaf(&self, c: usize, p: Point) -> bool {
+        let (lo, hi) = self.leaves[c];
+        p.x >= lo.x && p.x < hi.x && p.y >= lo.y && p.y < hi.y
     }
 
     #[inline]
@@ -171,11 +324,59 @@ impl Grid {
     }
 }
 
+/// A projection direction for sweep-and-prune: x, y, or one of the diagonals (`x + y`,
+/// `x - y`). All are exact integer projections.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Dir {
+    X,
+    Y,
+    D1,
+    D2,
+}
+
+impl Dir {
+    const ALL: [Dir; 4] = [Dir::X, Dir::Y, Dir::D1, Dir::D2];
+
+    #[inline]
+    fn proj(self, p: Point) -> i64 {
+        match self {
+            Dir::X => p.x,
+            Dir::Y => p.y,
+            Dir::D1 => p.x + p.y,
+            Dir::D2 => p.x - p.y,
+        }
+    }
+
+    /// Projected interval of a segment.
+    #[inline]
+    fn range(self, s: &(Point, Point)) -> (i64, i64) {
+        let (a, b) = (self.proj(s.0), self.proj(s.1));
+        (a.min(b), a.max(b))
+    }
+
+    /// The direction along which the segments' projections are thinnest in total.
+    fn best(segs: &[(Point, Point)], items: &[u32]) -> Dir {
+        let mut w = [0i128; 4];
+        for &i in items {
+            let s = &segs[i as usize];
+            for (k, d) in Dir::ALL.iter().enumerate() {
+                let (lo, hi) = d.range(s);
+                // Diagonal projections stretch distances by sqrt(2): weight 7/10 ≈ 1/sqrt(2).
+                let len = (hi - lo) as i128;
+                w[k] += if k < 2 { 10 * len } else { 7 * len };
+            }
+        }
+        let k = (0..4).min_by_key(|&k| w[k]).unwrap();
+        Dir::ALL[k]
+    }
+}
+
 /// Calls `f(i, j)` for every pair of segments in the cell whose bounding boxes overlap.
 fn for_each_pair(
+    segs: &[(Point, Point)],
     items: &[u32],
     bboxes: &[Rect],
-    order: &mut Vec<u32>,
+    order: &mut Vec<(i64, i64, u32)>,
     mut f: impl FnMut(u32, u32),
 ) {
     if items.len() <= 24 {
@@ -189,17 +390,22 @@ fn for_each_pair(
         }
         return;
     }
+    // Sweep-and-prune along the direction where the segments are thinnest: segments that
+    // meet have overlapping projections on every direction.
+    let d = Dir::best(segs, items);
     order.clear();
-    order.extend_from_slice(items);
-    order.sort_unstable_by_key(|&i| bboxes[i as usize].min.x);
-    for (k, &i) in order.iter().enumerate() {
+    order.extend(items.iter().map(|&i| {
+        let (lo, hi) = d.range(&segs[i as usize]);
+        (lo, hi, i)
+    }));
+    order.sort_unstable();
+    for (k, &(_, hi, i)) in order.iter().enumerate() {
         let bi = &bboxes[i as usize];
-        for &j in &order[k + 1..] {
-            let bj = &bboxes[j as usize];
-            if bj.min.x > bi.max.x {
+        for &(lo2, _, j) in &order[k + 1..] {
+            if lo2 > hi {
                 break;
             }
-            if bj.min.y <= bi.max.y && bi.min.y <= bj.max.y {
+            if bi.intersects(&bboxes[j as usize]) {
                 f(i, j);
             }
         }
@@ -246,8 +452,8 @@ pub(crate) fn snap_round(segs: &[(Point, Point)]) -> Vec<Frag> {
     let bboxes: Vec<Rect> = segs.iter().map(seg_bbox).collect();
     let grid = Grid::build(segs, &bboxes);
     let (pstart, pix, mut active) = hot_pixels(segs, &bboxes, &grid);
-    let (hits, near) = find_hits(segs, &bboxes, &grid, &pstart, &pix);
-    let affected = activate(segs, &grid, &pstart, &pix, &hits, &mut active);
+    let (hits, near, own) = find_hits(segs, &bboxes, &grid, &pstart, &pix);
+    let affected = activate(segs, &pix, &hits, &own, &mut active);
     drop((pstart, grid, bboxes));
     build_frags(segs, &pix, &hits, &near, &affected)
 }
@@ -263,24 +469,28 @@ fn hot_pixels(
 ) -> (Vec<u32>, Vec<Point>, Vec<bool>) {
     let mut order = Vec::new();
     let mut hot: Vec<(u32, (Point, bool))> = Vec::with_capacity(segs.len() * 2);
-    for s in segs {
-        hot.push((grid.cell(s.0) as u32, (s.0, false)));
-        hot.push((grid.cell(s.1) as u32, (s.1, false)));
-    }
     for c in 0..grid.n_cells() {
         let items = grid.items(c);
+        // Endpoints, each reported by the leaf containing it.
+        for &i in items {
+            let (a, b) = segs[i as usize];
+            for p in [a, b] {
+                if grid.in_leaf(c, p) {
+                    hot.push((c as u32, (p, false)));
+                }
+            }
+        }
         if items.len() < 2 {
             continue;
         }
-        for_each_pair(items, bboxes, &mut order, |i, j| {
+        for_each_pair(segs, items, bboxes, &mut order, |i, j| {
             let (a, b) = segs[i as usize];
             let (p, q) = segs[j as usize];
             if segments_cross_properly(a, b, p, q) {
                 let x = rounded_crossing(a, b, p, q);
-                // Report each crossing once: in the cell containing its pixel.
-                let xc = grid.cell(x);
-                if xc == c {
-                    hot.push((xc as u32, (x, true)));
+                // Report each crossing once: in the leaf containing its pixel.
+                if grid.in_leaf(c, x) {
+                    hot.push((c as u32, (x, true)));
                 }
             }
         });
@@ -309,13 +519,6 @@ fn hot_pixels(
     (out_start, pix.into_iter().map(|x| x.0).collect(), active)
 }
 
-/// Index of the candidate pixel at `p` (which must be one).
-fn pixel_index(grid: &Grid, pstart: &[u32], pix: &[Point], p: Point) -> Option<u32> {
-    let c = grid.cell(p);
-    let s = &pix[pstart[c] as usize..pstart[c + 1] as usize];
-    s.binary_search(&p).ok().map(|k| pstart[c] + k as u32)
-}
-
 type Csr = (Vec<u32>, Vec<u32>);
 
 /// Per segment (CSR of pixel indices), the candidate pixels it meets other than its own
@@ -328,37 +531,53 @@ fn find_hits(
     grid: &Grid,
     pstart: &[u32],
     pix: &[Point],
-) -> (Csr, Csr) {
+) -> (Csr, Csr, Vec<[u32; 2]>) {
     let mut hits: Vec<(u32, u32)> = Vec::new();
     let mut near: Vec<(u32, u32)> = Vec::new();
+    // Pixel indices of every segment's own endpoints.
+    let mut own: Vec<[u32; 2]> = vec![[u32::MAX; 2]; segs.len()];
+    let mut by_d: Vec<(i64, u32)> = Vec::new();
     for c in 0..grid.n_cells() {
         let base = pstart[c] as usize;
         let cp = &pix[base..pstart[c + 1] as usize];
         if cp.is_empty() {
             continue;
         }
+        // Pixels are sorted by (x, y); for leaves with many pixels and segments that are
+        // thin along another direction, also sort them by that projection.
+        let dir = if cp.len() > 16 {
+            Dir::best(segs, grid.items(c))
+        } else {
+            Dir::X
+        };
+        by_d.clear();
+        if dir != Dir::X {
+            by_d.extend(cp.iter().enumerate().map(|(k, &p)| (dir.proj(p), k as u32)));
+            by_d.sort_unstable();
+        }
         for &si in grid.items(c) {
             let (a, b) = segs[si as usize];
+            for (k, p) in [a, b].into_iter().enumerate() {
+                if grid.in_leaf(c, p)
+                    && let Ok(x) = cp.binary_search(&p)
+                {
+                    own[si as usize][k] = (base + x) as u32;
+                }
+            }
             let bb = &bboxes[si as usize];
-            let from = if cp.len() > 8 {
-                cp.partition_point(|p| p.x < bb.min.x - 1)
-            } else {
-                0
-            };
             let dx = (b.x - a.x) as f64;
             let dy = (b.y - a.y) as f64;
             let len2 = dx * dx + dy * dy;
-            for (k, &p) in cp.iter().enumerate().skip(from) {
-                if p.x > bb.max.x + 1 {
-                    break;
-                }
+            let mut test = |k: usize| {
+                let p = cp[k];
                 if p.x < bb.min.x - 1
+                    || p.x > bb.max.x + 1
                     || p.y < bb.min.y - 1
                     || p.y > bb.max.y + 1
                     || p == a
                     || p == b
                 {
-                    continue;
+                    return;
                 }
                 // Meeting the pixel, or lying on a fragment, requires the centre to be within
                 // sqrt(2)/2 of the segment's line: |cross| <= 0.71 * len. The float cross
@@ -367,7 +586,7 @@ fn find_hits(
                 let py = (p.y - a.y) as f64;
                 let o = dx * py - dy * px;
                 if o * o > 0.55 * len2 {
-                    continue;
+                    return;
                 }
                 // Fast accept: within 1/2 of the line and well inside the segment's span
                 // means the segment crosses the pixel's inscribed disk.
@@ -380,10 +599,25 @@ fn find_hits(
                 } else {
                     near.push((si, id));
                 }
+            };
+            if cp.len() <= 16 {
+                (0..cp.len()).for_each(&mut test);
+            } else if dir == Dir::X {
+                // Scan the x-sorted pixels within the segment's (grown) x-range.
+                let from = cp.partition_point(|p| p.x < bb.min.x - 1);
+                let to = from + cp[from..].partition_point(|p| p.x <= bb.max.x + 1);
+                (from..to).for_each(&mut test);
+            } else {
+                // Pixels within distance 1 of the segment project within 2 units of its
+                // projected range.
+                let (lo, hi) = dir.range(&(a, b));
+                let from = by_d.partition_point(|x| x.0 < lo - 2);
+                let to = from + by_d[from..].partition_point(|x| x.0 <= hi + 2);
+                by_d[from..to].iter().for_each(|&(_, k)| test(k as usize));
             }
         }
     }
-    (csr(segs.len(), &hits), csr(segs.len(), &near))
+    (csr(segs.len(), &hits), csr(segs.len(), &near), own)
 }
 
 /// Decides which candidate pixels are hot and which segments get rerouted.
@@ -397,10 +631,9 @@ fn find_hits(
 #[inline(never)]
 fn activate(
     segs: &[(Point, Point)],
-    grid: &Grid,
-    pstart: &[u32],
     pix: &[Point],
     hits: &Csr,
+    own: &[[u32; 2]],
     active: &mut [bool],
 ) -> Vec<bool> {
     let n = segs.len();
@@ -428,15 +661,11 @@ fn activate(
                 }
             }
         } else if let Some(s) = seg_stack.pop() {
-            let (a, b) = segs[s as usize];
-            let own = [
-                pixel_index(grid, pstart, pix, a),
-                pixel_index(grid, pstart, pix, b),
-            ];
+            let ends = own[s as usize].into_iter().filter(|&p| p != u32::MAX);
             let met = hpix[hstart[s as usize] as usize..hstart[s as usize + 1] as usize]
                 .iter()
                 .copied();
-            for p in met.chain(own.into_iter().flatten()) {
+            for p in met.chain(ends) {
                 if !active[p as usize] {
                     active[p as usize] = true;
                     px_stack.push(p);
@@ -551,7 +780,7 @@ pub(crate) fn node_exact(segs: &[(Point, Point)]) -> Result<Vec<Frag>, Crossing>
         if items.len() < 2 {
             continue;
         }
-        for_each_pair(items, &bboxes, &mut order, |i, j| {
+        for_each_pair(segs, items, &bboxes, &mut order, |i, j| {
             let (a, b) = segs[i as usize];
             let (p, q) = segs[j as usize];
             if segments_cross_properly(a, b, p, q) {
@@ -566,7 +795,7 @@ pub(crate) fn node_exact(segs: &[(Point, Point)]) -> Result<Vec<Frag>, Crossing>
             }
             for (s, (u, v), pts) in [(i, (a, b), [p, q]), (j, (p, q), [a, b])] {
                 for x in pts {
-                    if grid.cell(x) == c && in_segment_interior(u, v, x) {
+                    if grid.in_leaf(c, x) && in_segment_interior(u, v, x) {
                         splits.push((s, (crate::predicates::dist2(u, x), x)));
                     }
                 }
