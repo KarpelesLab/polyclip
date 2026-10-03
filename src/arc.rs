@@ -666,3 +666,64 @@ mod tests {
         assert!(tagged[1].tags.iter().all(|&t| t == 10));
     }
 }
+
+/// Rebuilds a curved contour from a tagged ring: maximal runs of consecutive edges whose
+/// tag maps to an arc (`arc_of(tag) = Some((center, ccw))`) become one
+/// [`Curve::CenterArc`]; every other edge becomes a [`Curve::Line`].
+///
+/// Use with tags assigned per arc when approximating ([`Shape::to_tagged`]) or offsetting
+/// ([`offset_shape_tagged`](crate::offset_shape_tagged)): after booleans and offsets, the
+/// surviving pieces of each arc are emitted as single arcs (for example Gerber `G02`/`G03`
+/// moves) instead of many short segments. The contour starts at the ring's first vertex
+/// whose incoming and outgoing edges belong to different runs (or at the first vertex if
+/// the whole ring is one run). The arc end points are the ring's integer vertices, so the
+/// arc's radius at each end may differ from the nominal radius by the rounding (at most
+/// `sqrt(2)/2`).
+///
+/// ```
+/// use polyclip::{arcs_from_tags, ArcTol, Circle, Curve, Point, Side, TaggedRing};
+/// let c = Circle::new(Point::new(0, 0), 10_000).to_ring(ArcTol::new(5, Side::Nearest)).unwrap();
+/// let tagged = TaggedRing::uniform(c, 7);
+/// let contour = arcs_from_tags(&tagged, &|t| (t == 7).then_some((Point::new(0, 0), true)));
+/// assert_eq!(contour.len(), 1); // one full-circle arc
+/// ```
+pub fn arcs_from_tags(ring: &TaggedRing, arc_of: &dyn Fn(u64) -> Option<(Point, bool)>) -> Contour {
+    let n = ring.points.len();
+    if n == 0 || ring.tags.len() != n {
+        return Vec::new();
+    }
+    let run_key = |i: usize| -> Option<u64> { arc_of(ring.tags[i]).map(|_| ring.tags[i]) };
+    // Start at a vertex where the run changes, so no run wraps around.
+    let start = (0..n).find(|&i| {
+        let prev = (i + n - 1) % n;
+        run_key(prev).is_none() || run_key(prev) != run_key(i)
+    });
+    let start = start.unwrap_or(0);
+    let mut out: Contour = Vec::new();
+    let mut k = 0;
+    while k < n {
+        let i = (start + k) % n;
+        match arc_of(ring.tags[i]) {
+            None => {
+                out.push(Curve::Line(ring.points[(i + 1) % n]));
+                k += 1;
+            }
+            Some((center, ccw)) => {
+                let tag = ring.tags[i];
+                let mut j = k;
+                while j < n && ring.tags[(start + j) % n] == tag {
+                    j += 1;
+                }
+                out.push(Curve::CenterArc {
+                    center,
+                    end: ring.points[(start + j) % n],
+                    ccw,
+                });
+                k = j;
+            }
+        }
+    }
+    // As for every contour, the implicit start point is the end of the last element
+    // (`points[start]`).
+    out
+}

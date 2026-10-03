@@ -289,3 +289,43 @@ fn deterministic() {
     // Input order and ring start vertices must not change the result.
     assert_eq!(run(false), run(true));
 }
+
+#[test]
+fn arcs_survive_booleans() {
+    // A pad with four rounded corners, tagged per element, minus a slot: the remaining
+    // corner arcs come back as single arcs.
+    let pad = rounded_rect(Point::new(0, 0), 4 * MM, 2 * MM, 500_000);
+    let tol = ArcTol::new(100, Side::Nearest);
+    let tagged = pad.to_tagged(tol, &|_, j| j as u64 + 1).unwrap();
+    // Elements 1, 3, 5, 7 are the corner arcs (centres listed for the lookup).
+    let centres = [
+        (2, Point::new(1_500_000, -500_000)),
+        (4, Point::new(1_500_000, 500_000)),
+        (6, Point::new(-1_500_000, 500_000)),
+        (8, Point::new(-1_500_000, -500_000)),
+    ];
+    let arc_of = |t: u64| centres.iter().find(|c| c.0 == t).map(|c| (c.1, true));
+    let slot = Ring::from([
+        (-100_000, -2 * MM),
+        (100_000, -2 * MM),
+        (100_000, 2 * MM),
+        (-100_000, 2 * MM),
+    ]);
+    let res = Boolean::new()
+        .subject(&tagged, FillRule::NonZero)
+        .clip(&slot, FillRule::NonZero)
+        .op(Op::Difference)
+        .execute_tagged()
+        .unwrap();
+    assert_eq!(res.len(), 2);
+    for p in &res {
+        let contour = arcs_from_tags(&p.outer, &arc_of);
+        let arcs = contour
+            .iter()
+            .filter(|c| matches!(c, Curve::CenterArc { .. }))
+            .count();
+        assert_eq!(arcs, 2, "{contour:?}");
+        // Straight parts stay lines; total element count is small.
+        assert!(contour.len() <= 8, "{contour:?}");
+    }
+}
