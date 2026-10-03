@@ -30,6 +30,12 @@ serde = { version = "1", features = ["derive"], optional = true }
 
 [dev-dependencies]
 proptest = { version = "1", default-features = false, features = ["std"] }
+# Benchmarks only (never a library dependency). 0.8 needs Rust 1.86, within our MSRV.
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "workloads"
+harness = false
 
 [profile.release]
 debug = "line-tables-only"
