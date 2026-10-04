@@ -26,6 +26,35 @@ fn public_types_are_send_sync() {
     assert_send_sync::<Trapezoid>();
     assert_send_sync::<Error>();
     assert_send_sync::<ValidityError>();
+    assert_send_sync::<Prepared<'static, PolygonSet>>();
+    assert_send_sync::<Prepared<'static, PolyTree>>();
+}
+
+#[test]
+fn prepared_shared_across_threads() {
+    let zone = vec![Polygon::new(
+        Ring::from([(0, 0), (1000, 0), (1000, 1000), (0, 1000)]),
+        vec![Ring::from([(400, 400), (400, 600), (600, 600), (600, 400)])],
+    )];
+    let p = Prepared::new(&zone);
+    let pad = |x: i64| Ring::from([(x, 450), (x + 50, 450), (x + 50, 500), (x, 500)]);
+    let got: Vec<(bool, bool)> = std::thread::scope(|s| {
+        let hs: Vec<_> = (0..4)
+            .map(|i| {
+                let p = &p;
+                s.spawn(move || {
+                    (
+                        p.contains(&pad(100 * i)),
+                        p.distance(&pad(100 * i)).is_some(),
+                    )
+                })
+            })
+            .collect();
+        hs.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    for (i, g) in got.iter().enumerate() {
+        assert_eq!(*g, (contains(&zone, &pad(100 * i as i64)), true));
+    }
 }
 
 #[test]
