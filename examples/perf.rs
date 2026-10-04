@@ -1,4 +1,7 @@
 use polyclip::*;
+
+#[path = "../tests/common/corpus.rs"]
+mod corpus;
 use std::time::Instant;
 
 fn lcg(s: &mut u64) -> u64 {
@@ -27,7 +30,61 @@ fn checksum(ps: &PolygonSet) -> u64 {
     h.finish()
 }
 
+fn best<T>(f: impl Fn() -> T) -> (std::time::Duration, T) {
+    let mut d = std::time::Duration::MAX;
+    let mut out = None;
+    for _ in 0..3 {
+        let t = Instant::now();
+        out = Some(f());
+        d = d.min(t.elapsed());
+    }
+    (d, out.unwrap())
+}
+
+/// POLYGON_LIB.md section 8: cadlab's opening workload on the real corpus.
+fn cadlab() {
+    let fill = corpus::load("cadlab_gnd_in1.pclp");
+    let tol = ArcTol::new(5_000, Side::Inside);
+    let w = 100_000;
+    let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
+    let (d, shrunk) = best(|| offset(&fill, -w, Join::Round, tol).unwrap());
+    println!("offset(-100 um): {:7.1} ms", ms(d));
+    let (d, _) = best(|| union_all(&fill, FillRule::NonZero).unwrap());
+    println!("  normalize input: {:7.1} ms", ms(d));
+    let (d, grown) = best(|| offset(&shrunk, w, Join::Round, tol).unwrap());
+    println!("offset(+100 um): {:7.1} ms", ms(d));
+    let (d, opened) = best(|| opening(&fill, w, tol).unwrap());
+    println!(
+        "opening:         {:7.1} ms (equal: {})",
+        ms(d),
+        opened == grown
+    );
+    let spokes: Vec<Ring> = (0..40)
+        .map(|k| {
+            let (x, y) = (10_000_000 + k * 3_000_000, 50_000_000);
+            Ring::from([
+                (x, y),
+                (x + 250_000, y),
+                (x + 250_000, y + 1_000_000),
+                (x, y + 1_000_000),
+            ])
+        })
+        .collect();
+    let (d, _) = best(|| {
+        Boolean::new()
+            .subject(&opened, FillRule::NonZero)
+            .subject(&spokes, FillRule::NonZero)
+            .execute()
+            .unwrap()
+    });
+    println!("union + 40 spokes: {:7.1} ms", ms(d));
+}
+
 fn main() {
+    if std::env::args().any(|a| a == "cadlab") {
+        cadlab();
+        return;
+    }
     if std::env::args().any(|a| a == "wide") {
         if std::env::var("PITCH").is_ok() {
             return diag_only();
