@@ -152,6 +152,8 @@ mod validate;
 mod wide;
 
 pub use arc::{ArcTol, Circle, Contour, Curve, MAX_ARC_VERTICES, Shape, Side, arcs_from_tags};
+#[doc(hidden)]
+pub use arrangement::{Engine, set_engine};
 pub use boolean::{
     Boolean, ClippedPaths, FillRule, Op, PathSource, RingSource, VertexVisitor, boolean,
     clip_paths, set_always_monolithic, union_all,

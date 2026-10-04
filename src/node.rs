@@ -16,6 +16,7 @@
 //! listed in every cell it passes within distance 1 of, so any two segments meeting near a
 //! point are both listed in that point's cell.
 
+use crate::arrangement::Engine;
 use crate::dir::Dir;
 use crate::geom::{Point, Rect};
 use crate::predicates::{
@@ -148,20 +149,50 @@ impl Grid {
         };
         // Budget check before building anything.
         let budget = 6 * n + 1024;
-        let mut count = 0usize;
-        for i in 0..n {
-            cells(i, &mut |_, _| count += 1);
-            if count > budget {
-                return None;
+        let counts = crate::par::map_ranges(n, |range| {
+            let mut count = 0usize;
+            for i in range {
+                cells(i, &mut |_, _| count += 1);
+                if count > budget {
+                    break;
+                }
             }
+            count
+        });
+        if counts.iter().fold(0usize, |a, &c| a.saturating_add(c)) > budget {
+            return None;
         }
-        let mut pairs: Vec<(u32, u32)> = Vec::with_capacity(count);
-        for i in 0..n {
-            cells(i, &mut |cx, cy| {
-                pairs.push(((cy * nx + cx) as u32, i as u32))
+        let (start, items) = if crate::par::threads() > 1 {
+            // (cell, segment) keys sorted: the same lists as the stable counting sort.
+            let parts = crate::par::map_ranges(n, |range| {
+                let mut keys: Vec<u64> = Vec::new();
+                for i in range {
+                    cells(i, &mut |cx, cy| {
+                        keys.push(((cy * nx + cx) as u64) << 32 | i as u64)
+                    });
+                }
+                keys
             });
-        }
-        let (start, items) = csr(nx * ny, &pairs);
+            let mut keys = crate::par::concat(&parts, |p| &p[..]);
+            drop(parts);
+            crate::par::sort_unstable(&mut keys);
+            let mut start = vec![0u32; nx * ny + 1];
+            for &k in &keys {
+                start[(k >> 32) as usize + 1] += 1;
+            }
+            for c in 0..nx * ny {
+                start[c + 1] += start[c];
+            }
+            (start, keys.iter().map(|&k| k as u32).collect())
+        } else {
+            let mut pairs: Vec<(u32, u32)> = Vec::with_capacity(counts.iter().sum());
+            for i in 0..n {
+                cells(i, &mut |cx, cy| {
+                    pairs.push(((cy * nx + cx) as u32, i as u32))
+                });
+            }
+            csr(nx * ny, &pairs)
+        };
         // Too dense somewhere: the adaptive partition will do better.
         if start.windows(2).any(|w| w[1] - w[0] > 256) {
             return None;
@@ -505,12 +536,31 @@ pub(crate) fn rounded_crossing(a: Point, b: Point, c: Point, d: Point) -> Point 
 /// Snap-rounds `segs` (each with distinct endpoints). Returns the fragments of every
 /// segment, grouped by segment in input order and ordered from `a` to `b` within a segment.
 pub(crate) fn snap_round(segs: &[(Point, Point)]) -> Vec<Frag> {
+    snap_round_with(segs, Engine::Auto)
+}
+
+/// [`snap_round`] with a choice of implementation (all give the same result).
+pub(crate) fn snap_round_with(segs: &[(Point, Point)], engine: Engine) -> Vec<Frag> {
+    snap_round_chunks(segs, engine).concat()
+}
+
+/// [`snap_round_with`], with the fragments in consecutive chunks.
+pub(crate) fn snap_round_chunks(segs: &[(Point, Point)], engine: Engine) -> Vec<Vec<Frag>> {
     let bboxes: Vec<Rect> = segs.iter().map(seg_bbox).collect();
     let grid = Grid::build(segs, &bboxes);
     let pp = pair_pass(segs, &bboxes, &grid);
+    let hot = pp.crossing.iter().filter(|&&c| c).count();
+    let dense = match engine {
+        Engine::Reference => false,
+        Engine::Split => true,
+        Engine::Auto => hot * 16 > segs.len(),
+    };
+    if dense {
+        return snap_dense(segs, &bboxes, &grid, &pp, engine == Engine::Split);
+    }
     let mut st = Snap::new(segs, &bboxes, &grid, &pp);
     st.run();
-    st.fragments(&pp.splits)
+    vec![st.fragments(&pp.splits)]
 }
 
 /// Output of the pair pass.
@@ -532,91 +582,101 @@ type Csr2 = (Vec<u32>, Vec<(i128, Point)>);
 /// on another segment's interior), and collects the candidate pixels of every leaf.
 #[inline(never)]
 fn pair_pass(segs: &[(Point, Point)], bboxes: &[Rect], grid: &Grid) -> PairPass {
-    type Chunk = (Vec<(u32, (Point, bool))>, Vec<(u32, (i128, Point))>);
+    struct Chunk {
+        /// Candidate pixels of every leaf of the range, sorted without duplicates.
+        count: Vec<u32>,
+        pix: Vec<Point>,
+        crossing: Vec<bool>,
+        splits: Vec<(u32, (i128, Point))>,
+    }
     let chunks: Vec<Chunk> = crate::par::map_ranges(grid.n_cells(), |range| {
         let mut order = Vec::new();
-        let mut hot: Vec<(u32, (Point, bool))> = Vec::new();
+        let mut hot: Vec<(Point, bool)> = Vec::new();
         let mut splits: Vec<(u32, (i128, Point))> = Vec::new();
+        let mut count = Vec::with_capacity(range.len());
+        let mut pix = Vec::new();
+        let mut crossing = Vec::new();
         for c in range {
+            hot.clear();
             let items = grid.items(c);
             // Endpoints, each reported by the leaf containing it.
             for &i in items {
                 let (a, b) = segs[i as usize];
                 for p in [a, b] {
                     if grid.in_leaf(c, p) {
-                        hot.push((c as u32, (p, false)));
+                        hot.push((p, false));
                     }
                 }
             }
-            if items.len() < 2 {
-                continue;
+            if items.len() >= 2 {
+                for_each_pair(segs, items, bboxes, &mut order, |i, j| {
+                    let (a, b) = segs[i as usize];
+                    let (p, q) = segs[j as usize];
+                    let o1 = orient(a, b, p).signum();
+                    let o2 = orient(a, b, q).signum();
+                    let o3 = orient(p, q, a).signum();
+                    let o4 = orient(p, q, b).signum();
+                    if o1 * o2 < 0 && o3 * o4 < 0 {
+                        let x = rounded_crossing(a, b, p, q);
+                        // Report each crossing once: in the leaf containing its pixel.
+                        if grid.in_leaf(c, x) {
+                            hot.push((x, true));
+                        }
+                        return;
+                    }
+                    // T-junctions (each reported by the leaf containing the junction point).
+                    let mut tj = |s: u32, u: Point, v: Point, o: i32, x: Point| {
+                        if o == 0
+                            && x != u
+                            && x != v
+                            && grid.in_leaf(c, x)
+                            && crate::predicates::on_segment(u, v, x)
+                        {
+                            splits.push((s, (crate::predicates::dist2(u, x), x)));
+                        }
+                    };
+                    tj(i, a, b, o1 as i32, p);
+                    tj(i, a, b, o2 as i32, q);
+                    tj(j, p, q, o3 as i32, a);
+                    tj(j, p, q, o4 as i32, b);
+                });
             }
-            for_each_pair(segs, items, bboxes, &mut order, |i, j| {
-                let (a, b) = segs[i as usize];
-                let (p, q) = segs[j as usize];
-                let o1 = orient(a, b, p).signum();
-                let o2 = orient(a, b, q).signum();
-                let o3 = orient(p, q, a).signum();
-                let o4 = orient(p, q, b).signum();
-                if o1 * o2 < 0 && o3 * o4 < 0 {
-                    let x = rounded_crossing(a, b, p, q);
-                    // Report each crossing once: in the leaf containing its pixel.
-                    if grid.in_leaf(c, x) {
-                        hot.push((c as u32, (x, true)));
-                    }
-                    return;
+            // The leaf's candidate pixels, sorted without duplicates (merging flags).
+            hot.sort_unstable();
+            let first = pix.len();
+            for &(p, f) in &hot {
+                if pix.len() > first && pix[pix.len() - 1] == p {
+                    *crossing.last_mut().unwrap_or(&mut false) |= f;
+                } else {
+                    pix.push(p);
+                    crossing.push(f);
                 }
-                // T-junctions (each reported by the leaf containing the junction point).
-                let mut tj = |s: u32, u: Point, v: Point, o: i32, x: Point| {
-                    if o == 0
-                        && x != u
-                        && x != v
-                        && grid.in_leaf(c, x)
-                        && crate::predicates::on_segment(u, v, x)
-                    {
-                        splits.push((s, (crate::predicates::dist2(u, x), x)));
-                    }
-                };
-                tj(i, a, b, o1 as i32, p);
-                tj(i, a, b, o2 as i32, q);
-                tj(j, p, q, o3 as i32, a);
-                tj(j, p, q, o4 as i32, b);
-            });
+            }
+            count.push((pix.len() - first) as u32);
         }
-        (hot, splits)
+        Chunk {
+            count,
+            pix,
+            crossing,
+            splits,
+        }
     });
     // Concatenate in leaf order (deterministic for any number of threads).
-    let mut hot: Vec<(u32, (Point, bool))> =
-        Vec::with_capacity(chunks.iter().map(|c| c.0.len()).sum());
-    let mut splits: Vec<(u32, (i128, Point))> = Vec::new();
-    for (h, s) in chunks {
-        hot.extend(h);
-        splits.extend(s);
-    }
-    let (pstart, mut pix) = csr(grid.n_cells(), &hot);
-    drop(hot);
-    // Sort and dedup within each leaf (merging flags), compacting in place.
-    let mut out_start = vec![0u32; grid.n_cells() + 1];
-    let mut w = 0usize;
-    for c in 0..grid.n_cells() {
-        let (s0, s1) = (pstart[c] as usize, pstart[c + 1] as usize);
-        pix[s0..s1].sort_unstable();
-        for k in s0..s1 {
-            let (p, f) = pix[k];
-            if w > out_start[c] as usize && pix[w - 1].0 == p {
-                pix[w - 1].1 |= f;
-            } else {
-                pix[w] = (p, f);
-                w += 1;
-            }
+    let mut pstart = Vec::with_capacity(grid.n_cells() + 1);
+    pstart.push(0u32);
+    for ch in &chunks {
+        for &k in &ch.count {
+            pstart.push(pstart[pstart.len() - 1] + k);
         }
-        out_start[c + 1] = w as u32;
     }
-    pix.truncate(w);
+    let splits: Vec<(u32, (i128, Point))> = chunks
+        .iter()
+        .flat_map(|c| c.splits.iter().copied())
+        .collect();
     PairPass {
-        pstart: out_start,
-        crossing: pix.iter().map(|x| x.1).collect(),
-        pix: pix.into_iter().map(|x| x.0).collect(),
+        pstart,
+        crossing: crate::par::concat(&chunks, |c| &c.crossing),
+        pix: crate::par::concat(&chunks, |c| &c.pix),
         splits: csr(segs.len(), &splits),
     }
 }
@@ -660,6 +720,71 @@ pub(crate) fn relation(a: Point, b: Point, bb: &Rect, p: Point) -> Rel {
         Rel::Meets
     } else {
         Rel::Near
+    }
+}
+
+/// The data needed to compute the segment/pixel relations of a leaf.
+struct Leaves<'a> {
+    segs: &'a [(Point, Point)],
+    bboxes: &'a [Rect],
+    grid: &'a Grid,
+    pstart: &'a [u32],
+    pix: &'a [Point],
+}
+
+impl Leaves<'_> {
+    /// Segment/pixel relations of leaf `c` (pure; `by_d` is scratch space).
+    fn relations(&self, c: usize, by_d: &mut Vec<(i128, u32)>, found: &mut Vec<(u32, u32, Rel)>) {
+        let base = self.pstart[c] as usize;
+        let cp = &self.pix[base..self.pstart[c + 1] as usize];
+        if cp.is_empty() {
+            return;
+        }
+        let items = self.grid.items(c);
+        // For leaves with many pixels, sort them along the direction where the segments
+        // are thinnest (pixels are already sorted by x).
+        let dir = if cp.len() > 16 {
+            Dir::best(self.segs, items)
+        } else {
+            Dir::X
+        };
+        by_d.clear();
+        if dir != Dir::X {
+            by_d.extend(cp.iter().enumerate().map(|(k, &p)| (dir.proj(p), k as u32)));
+            by_d.sort_unstable();
+        }
+        for &s in items {
+            let (a, b) = self.segs[s as usize];
+            let bb = &self.bboxes[s as usize];
+            let mut test = |k: usize| {
+                let p = cp[k];
+                let id = (base + k) as u32;
+                if p == a || p == b {
+                    // Own endpoint: relevant only once the segment is affected.
+                    found.push((s, id, Rel::Far));
+                    return;
+                }
+                let r = relation(a, b, bb, p);
+                if r != Rel::Far {
+                    found.push((s, id, r));
+                }
+            };
+            if cp.len() <= 16 {
+                (0..cp.len()).for_each(&mut test);
+            } else if dir == Dir::X {
+                let from = cp.partition_point(|p| p.x < bb.min.x - 1);
+                let to = from + cp[from..].partition_point(|p| p.x <= bb.max.x + 1);
+                (from..to).for_each(&mut test);
+            } else {
+                // Pixels within distance 1 of the segment project within the margin of its
+                // projected range.
+                let (lo, hi) = dir.range(&(a, b));
+                let m = dir.margin();
+                let from = by_d.partition_point(|x| x.0 < lo - m);
+                let to = from + by_d[from..].partition_point(|x| x.0 <= hi + m);
+                by_d[from..to].iter().for_each(|&(_, k)| test(k as usize));
+            }
+        }
     }
 }
 
@@ -756,56 +881,14 @@ impl<'a> Snap<'a> {
         by_d: &mut Vec<(i128, u32)>,
         found: &mut Vec<(u32, u32, Rel)>,
     ) {
-        let base = self.pstart[c] as usize;
-        let cp = &self.pix[base..self.pstart[c + 1] as usize];
-        if cp.is_empty() {
-            return;
+        Leaves {
+            segs: self.segs,
+            bboxes: self.bboxes,
+            grid: self.grid,
+            pstart: self.pstart,
+            pix: self.pix,
         }
-        let items = self.grid.items(c);
-        // For leaves with many pixels, sort them along the direction where the segments
-        // are thinnest (pixels are already sorted by x).
-        let dir = if cp.len() > 16 {
-            Dir::best(self.segs, items)
-        } else {
-            Dir::X
-        };
-        by_d.clear();
-        if dir != Dir::X {
-            by_d.extend(cp.iter().enumerate().map(|(k, &p)| (dir.proj(p), k as u32)));
-            by_d.sort_unstable();
-        }
-        for &s in items {
-            let (a, b) = self.segs[s as usize];
-            let bb = &self.bboxes[s as usize];
-            let mut test = |k: usize| {
-                let p = cp[k];
-                let id = (base + k) as u32;
-                if p == a || p == b {
-                    // Own endpoint: relevant only once the segment is affected.
-                    found.push((s, id, Rel::Far));
-                    return;
-                }
-                let r = relation(a, b, bb, p);
-                if r != Rel::Far {
-                    found.push((s, id, r));
-                }
-            };
-            if cp.len() <= 16 {
-                (0..cp.len()).for_each(&mut test);
-            } else if dir == Dir::X {
-                let from = cp.partition_point(|p| p.x < bb.min.x - 1);
-                let to = from + cp[from..].partition_point(|p| p.x <= bb.max.x + 1);
-                (from..to).for_each(&mut test);
-            } else {
-                // Pixels within distance 1 of the segment project within the margin of its
-                // projected range.
-                let (lo, hi) = dir.range(&(a, b));
-                let m = dir.margin();
-                let from = by_d.partition_point(|x| x.0 < lo - m);
-                let to = from + by_d[from..].partition_point(|x| x.0 <= hi + m);
-                by_d[from..to].iter().for_each(|&(_, k)| test(k as usize));
-            }
-        }
+        .relations(c, by_d, found)
     }
 
     /// Computes all segment/pixel relations of leaf `c` and applies them.
@@ -969,85 +1052,308 @@ impl<'a> Snap<'a> {
         let (nstart, near) = csr(n, &core::mem::take(&mut self.near));
         let (sstart, sp) = (&splits.0, &splits.1);
         let mut out: Vec<Frag> = Vec::with_capacity(n + hits.len() + sp.len());
-        let mut poly: Vec<Point> = Vec::new();
-        let mut ord: Vec<(i128, Point)> = Vec::new();
-        let mut ins: Vec<(usize, i128, Point)> = Vec::new();
-        for (si, &(a, b)) in self.segs.iter().enumerate() {
-            let src = si as u32;
-            if !self.affected[si] {
-                // Unaffected: exact position, split at T-junctions only.
-                let s = &sp[sstart[si] as usize..sstart[si + 1] as usize];
-                if s.is_empty() {
-                    out.push(Frag { a, b, src });
-                    continue;
-                }
-                ord.clear();
-                ord.extend_from_slice(s);
-                ord.sort_unstable();
-                let mut cur = a;
-                for &(_, x) in &ord {
-                    if x != cur {
-                        out.push(Frag { a: cur, b: x, src });
-                        cur = x;
-                    }
-                }
-                out.push(Frag { a: cur, b, src });
-                continue;
-            }
-            // Hot pixels are met in the order of their centres' projections on the segment
-            // direction (pixel rows and columns are traversed monotonically).
-            let h = &hits[hstart[si] as usize..hstart[si + 1] as usize];
-            let d = sub(b, a);
-            ord.clear();
-            ord.extend(
-                h.iter()
-                    .map(|&k| self.pix[k as usize])
-                    .map(|p| (dot(sub(p, a), d), p)),
-            );
-            ord.sort_unstable();
-            ord.dedup();
-            poly.clear();
-            poly.push(a);
-            poly.extend(ord.iter().map(|x| x.1));
-            poly.push(b);
-            // T-junctions: candidate centres lying on a rerouted fragment's interior.
-            ins.clear();
-            for &k in &near[nstart[si] as usize..nstart[si + 1] as usize] {
-                let c = self.pix[k as usize];
-                for k in 0..poly.len() - 1 {
-                    if in_segment_interior(poly[k], poly[k + 1], c) {
-                        ins.push((k, crate::predicates::dist2(poly[k], c), c));
-                        break;
-                    }
-                }
-            }
-            ins.sort_unstable();
-            ins.dedup();
-            let mut j = 0;
-            for k in 0..poly.len() - 1 {
-                let mut cur = poly[k];
-                while j < ins.len() && ins[j].0 == k {
-                    if ins[j].2 != cur {
-                        out.push(Frag {
-                            a: cur,
-                            b: ins[j].2,
-                            src,
-                        });
-                        cur = ins[j].2;
-                    }
-                    j += 1;
-                }
-                if poly[k + 1] != cur {
-                    out.push(Frag {
-                        a: cur,
-                        b: poly[k + 1],
-                        src,
-                    });
-                }
-            }
+        let mut sc = FragScratch::default();
+        for (si, &seg) in self.segs.iter().enumerate() {
+            let rel = self.affected[si].then(|| {
+                (
+                    &hits[hstart[si] as usize..hstart[si + 1] as usize],
+                    &near[nstart[si] as usize..nstart[si + 1] as usize],
+                )
+            });
+            let s = &sp[sstart[si] as usize..sstart[si + 1] as usize];
+            seg_fragments(si as u32, seg, self.pix, rel, s, &mut sc, &mut out);
         }
         out
     }
+}
+
+/// Scratch space for [`seg_fragments`].
+#[derive(Default)]
+struct FragScratch {
+    poly: Vec<Point>,
+    ord: Vec<(i128, Point)>,
+    ins: Vec<(usize, i128, Point)>,
+}
+
+/// Appends the fragments of segment `src` (`a-b`) to `out`. `rel` is `None` when the
+/// segment is not rerouted (it is then only split at its exact T-junctions `splits`), else
+/// the candidate pixels it meets (own endpoints are skipped) and those near it.
+fn seg_fragments(
+    src: u32,
+    (a, b): (Point, Point),
+    pix: &[Point],
+    rel: Option<(&[u32], &[u32])>,
+    splits: &[(i128, Point)],
+    sc: &mut FragScratch,
+    out: &mut Vec<Frag>,
+) {
+    let FragScratch { poly, ord, ins } = sc;
+    let Some((hits, near)) = rel else {
+        // Unaffected: exact position, split at T-junctions only.
+        if splits.is_empty() {
+            out.push(Frag { a, b, src });
+            return;
+        }
+        ord.clear();
+        ord.extend_from_slice(splits);
+        ord.sort_unstable();
+        let mut cur = a;
+        for &(_, x) in ord.iter() {
+            if x != cur {
+                out.push(Frag { a: cur, b: x, src });
+                cur = x;
+            }
+        }
+        out.push(Frag { a: cur, b, src });
+        return;
+    };
+    // Hot pixels are met in the order of their centres' projections on the segment
+    // direction (pixel rows and columns are traversed monotonically).
+    let d = sub(b, a);
+    ord.clear();
+    ord.extend(
+        hits.iter()
+            .map(|&k| pix[k as usize])
+            .filter(|&p| p != a && p != b)
+            .map(|p| (dot(sub(p, a), d), p)),
+    );
+    ord.sort_unstable();
+    ord.dedup();
+    poly.clear();
+    poly.push(a);
+    poly.extend(ord.iter().map(|x| x.1));
+    poly.push(b);
+    // T-junctions: candidate centres lying on a rerouted fragment's interior.
+    ins.clear();
+    for &k in near {
+        let c = pix[k as usize];
+        for k in 0..poly.len() - 1 {
+            if in_segment_interior(poly[k], poly[k + 1], c) {
+                ins.push((k, crate::predicates::dist2(poly[k], c), c));
+                break;
+            }
+        }
+    }
+    ins.sort_unstable();
+    ins.dedup();
+    let mut j = 0;
+    for k in 0..poly.len() - 1 {
+        let mut cur = poly[k];
+        while j < ins.len() && ins[j].0 == k {
+            if ins[j].2 != cur {
+                out.push(Frag {
+                    a: cur,
+                    b: ins[j].2,
+                    src,
+                });
+                cur = ins[j].2;
+            }
+            j += 1;
+        }
+        if poly[k + 1] != cur {
+            out.push(Frag {
+                a: cur,
+                b: poly[k + 1],
+                src,
+            });
+        }
+    }
+}
+
+/// Relations found in a range of leaves by [`snap_dense`].
+struct LeafChunk {
+    /// The segments meeting each pixel of the range (not at an endpoint), as CSR over the
+    /// range's pixels.
+    pstart: Vec<u32>,
+    psegs: Vec<u32>,
+    /// `(segment, pixel)` pairs per segment range: pixels met (or own endpoints), and pixels
+    /// near the segment.
+    meet: Vec<Vec<(u32, u32)>>,
+    near: Vec<Vec<(u32, u32)>>,
+}
+
+/// Snap rounding when crossings are dense, so that almost every leaf takes part: all
+/// segment/pixel relations are computed up front (leaf ranges in parallel with the `rayon`
+/// feature) and grouped by pixel and by segment, the hot pixels and rerouted segments are
+/// found by a search over these lists, and the fragments are built (segment ranges in
+/// parallel). The hot pixels and rerouted segments form the same least fixpoint as with
+/// [`Snap`], so the result is identical. `split` cuts the work into as many pieces as
+/// possible (tests).
+fn snap_dense(
+    segs: &[(Point, Point)],
+    bboxes: &[Rect],
+    grid: &Grid,
+    pp: &PairPass,
+    split: bool,
+) -> Vec<Vec<Frag>> {
+    let n = segs.len();
+    let nl = grid.n_cells();
+    let npix = pp.pix.len();
+    let threads = crate::par::threads();
+    let (lchunks, nr) = if split {
+        (nl.min(97), n.clamp(1, 61))
+    } else if threads == 1 {
+        // Several segment ranges all the same: each range's fragments are freed as soon as
+        // they are merged.
+        (1, (n / 65536).clamp(1, 16))
+    } else {
+        (
+            (threads * 8).min(nl / 64).max(1),
+            (threads * 4).min(n / 1024).max(1),
+        )
+    };
+    let rsize = n.div_ceil(nr).max(1);
+    let lv = Leaves {
+        segs,
+        bboxes,
+        grid,
+        pstart: &pp.pstart,
+        pix: &pp.pix,
+    };
+    let chunks: Vec<LeafChunk> = crate::par::map_chunks(nl, lchunks, |range| {
+        let mut by_d = Vec::new();
+        let mut found = Vec::new();
+        let mut ps: Vec<(u32, u32)> = Vec::new();
+        let p0 = pp.pstart[range.start];
+        let mut pstart = vec![0u32; (pp.pstart[range.end] - p0) as usize + 1];
+        let mut psegs = Vec::new();
+        let mut meet = vec![Vec::new(); nr];
+        let mut near = vec![Vec::new(); nr];
+        for c in range {
+            // The leaf's pixels are its own: its relations complete their lists.
+            found.clear();
+            lv.relations(c, &mut by_d, &mut found);
+            ps.clear();
+            ps.extend(
+                found
+                    .iter()
+                    .filter(|x| x.2 == Rel::Meets)
+                    .map(|&(s, k, _)| (k, s)),
+            );
+            ps.sort_unstable();
+            let mut i = 0;
+            for k in pp.pstart[c]..pp.pstart[c + 1] {
+                while i < ps.len() && ps[i].0 == k {
+                    psegs.push(ps[i].1);
+                    i += 1;
+                }
+                pstart[(k - p0) as usize + 1] = psegs.len() as u32;
+            }
+            for &(s, k, r) in &found {
+                let list = if r == Rel::Near { &mut near } else { &mut meet };
+                list[s as usize / rsize].push((s, k));
+            }
+        }
+        LeafChunk {
+            pstart,
+            psegs,
+            meet,
+            near,
+        }
+    });
+    // Pixel -> segments, over all pixels.
+    let mut pstart: Vec<u32> = Vec::with_capacity(npix + 1);
+    pstart.push(0);
+    for c in &chunks {
+        let base = *pstart.last().unwrap_or(&0);
+        pstart.extend(c.pstart[1..].iter().map(|&x| x + base));
+    }
+    let psegs = crate::par::concat(&chunks, |c| &c.psegs);
+    // Segment -> pixels, per segment range.
+    let rids: Vec<usize> = (0..nr).collect();
+    let srange = |r: usize| (r * rsize).min(n)..((r + 1) * rsize).min(n);
+    let by_seg: Vec<(Csr, Csr)> = crate::par::map_items(&rids, |&r| {
+        let s0 = srange(r).start as u32;
+        let len = srange(r).len();
+        let group = |lists: &dyn Fn(&LeafChunk) -> &[(u32, u32)]| {
+            let v: Vec<(u32, u32)> = chunks
+                .iter()
+                .flat_map(|c| lists(c).iter().map(|&(s, k)| (s - s0, k)))
+                .collect();
+            csr(len, &v)
+        };
+        (group(&|c| &c.meet[r]), group(&|c| &c.near[r]))
+    });
+    drop(chunks);
+    let affected = fixpoint(
+        n,
+        &pp.crossing,
+        |k| &psegs[pstart[k] as usize..pstart[k + 1] as usize],
+        |s| {
+            let r = s / rsize;
+            let l = s - srange(r).start;
+            let (ms, mk) = &by_seg[r].0;
+            &mk[ms[l] as usize..ms[l + 1] as usize]
+        },
+    );
+    drop((pstart, psegs));
+    let (sstart, sp) = (&pp.splits.0, &pp.splits.1);
+    let parts: Vec<Vec<Frag>> = crate::par::map_items(&rids, |&r| {
+        let ((ms, mk), (ns, nk)) = &by_seg[r];
+        let range = srange(r);
+        let mut out = Vec::with_capacity(range.len() + mk.len());
+        let mut sc = FragScratch::default();
+        for si in range.clone() {
+            let l = si - range.start;
+            let rel = affected[si].then(|| {
+                (
+                    &mk[ms[l] as usize..ms[l + 1] as usize],
+                    &nk[ns[l] as usize..ns[l + 1] as usize],
+                )
+            });
+            let s = &sp[sstart[si] as usize..sstart[si + 1] as usize];
+            seg_fragments(si as u32, segs[si], &pp.pix, rel, s, &mut sc, &mut out);
+        }
+        out
+    });
+    parts
+}
+
+/// The rerouted segments of snap rounding, as a least fixpoint: crossing pixels are hot, a
+/// segment meeting a hot pixel (not at an endpoint, `pix_segs`) is rerouted, and every pixel
+/// a rerouted segment meets or ends at (`seg_pix`) is hot. Only the resulting set matters,
+/// so the search order is free: with the `rayon` feature large frontiers are expanded in
+/// parallel.
+fn fixpoint<'a>(
+    n: usize,
+    crossing: &[bool],
+    pix_segs: impl Fn(usize) -> &'a [u32] + Sync,
+    seg_pix: impl Fn(usize) -> &'a [u32] + Sync,
+) -> Vec<bool> {
+    use core::sync::atomic::{AtomicBool, Ordering::Relaxed};
+    let active: Vec<AtomicBool> = crossing.iter().map(|&c| AtomicBool::new(c)).collect();
+    let affected: Vec<AtomicBool> = (0..n).map(|_| AtomicBool::new(false)).collect();
+    // Marks `x` and reports whether it was new.
+    let mark = |flags: &[AtomicBool], x: u32| {
+        let f = &flags[x as usize];
+        !f.load(Relaxed) && !f.swap(true, Relaxed)
+    };
+    // The unmarked neighbours of a frontier (marking them).
+    let expand =
+        |frontier: &[u32], next: &(dyn Fn(usize) -> &'a [u32] + Sync), flags: &[AtomicBool]| {
+            let step = |part: &[u32]| -> Vec<u32> {
+                let mut out = Vec::new();
+                for &x in part {
+                    out.extend(next(x as usize).iter().filter(|&&y| mark(flags, y)));
+                }
+                out
+            };
+            #[cfg(feature = "rayon")]
+            if frontier.len() >= 4096 {
+                use rayon::prelude::*;
+                let parts: Vec<Vec<u32>> = frontier.par_chunks(1024).map(step).collect();
+                return parts.concat();
+            }
+            step(frontier)
+        };
+    let mut frontier: Vec<u32> = (0..crossing.len() as u32)
+        .filter(|&k| crossing[k as usize])
+        .collect();
+    while !frontier.is_empty() {
+        let segs = expand(&frontier, &pix_segs, &affected);
+        frontier = expand(&segs, &seg_pix, &active);
+    }
+    affected.into_iter().map(AtomicBool::into_inner).collect()
 }
 
 /// A proper crossing found by [`node_exact`]: the two segment indices (`i < j`).

@@ -29,11 +29,24 @@ struct Status {
 const BLOCK: usize = 256;
 
 impl Status {
-    fn new() -> Self {
-        Status {
+    /// A status holding `edges` (bottom to top).
+    fn from_sorted(edges: &[u32]) -> Self {
+        let mut st = Status {
             blocks: Vec::new(),
             last: Vec::new(),
+        };
+        for c in edges.chunks(BLOCK) {
+            let mut b = Vec::with_capacity(2 * BLOCK);
+            b.extend_from_slice(c);
+            st.last.push(*c.last().unwrap_or(&0));
+            st.blocks.push(b);
         }
+        st
+    }
+
+    /// All edges, bottom to top.
+    fn into_vec(self) -> Vec<u32> {
+        self.blocks.concat()
     }
 
     /// Position `(block, index)` of the first edge for which `below` is false.
@@ -163,24 +176,41 @@ pub(crate) fn sweep(edges: &[(Point, Point)], mut on_insert: impl FnMut(u32, Opt
 /// there (bottom to top).
 pub(crate) fn sweep_events(
     edges: &[(Point, Point)],
-    mut on_event: impl FnMut(Option<u32>, Option<u32>, &[u32], Range<u32>),
+    on_event: impl FnMut(Option<u32>, Option<u32>, &[u32], Range<u32>),
 ) {
-    let n = edges.len();
     let mut his: Vec<Point> = edges.iter().map(|e| e.1).collect();
     his.sort_unstable();
-    let mut status = Status::new();
+    sweep_band(edges, &his, 0..edges.len(), &[], on_event);
+}
+
+/// Runs the part of the sweep between two vertices `v0 < v1` (with `v0 = -inf`, `v1 = +inf`
+/// for the whole sweep), as [`sweep_events`] does, and returns the status reached (the
+/// edges `e` with `lo < v1 <= hi`, bottom to top).
+///
+/// `his` holds the sorted `hi` endpoints in `[v0, v1)`, `starting` the edges with `lo` in
+/// `[v0, v1)` and `initial` the status just before `v0` (the edges with `lo < v0 <= hi`,
+/// bottom to top, see [`cmp_status`]).
+pub(crate) fn sweep_band(
+    edges: &[(Point, Point)],
+    his: &[Point],
+    starting: Range<usize>,
+    initial: &[u32],
+    mut on_event: impl FnMut(Option<u32>, Option<u32>, &[u32], Range<u32>),
+) -> Vec<u32> {
+    let mut status = Status::from_sorted(initial);
     let mut ending_buf: Vec<u32> = Vec::new();
-    let mut si = 0usize;
+    let n = starting.end;
+    let mut si = starting.start;
     let mut hi = 0usize;
     loop {
-        let v = match (edges.get(si), his.get(hi)) {
+        let v = match (edges[..n].get(si), his.get(hi)) {
             (Some(e), Some(&h)) => e.0.min(h),
             (Some(e), None) => e.0,
             (None, Some(&h)) => h,
             (None, None) => break,
         };
         let mut ending = 0usize;
-        while hi < n && his[hi] == v {
+        while hi < his.len() && his[hi] == v {
             ending += 1;
             hi += 1;
         }
@@ -197,6 +227,24 @@ pub(crate) fn sweep_events(
         status.splice(b, i, ending, (s0..si).map(|e| e as u32));
         let above = status.after(b, i, si - s0);
         on_event(below, above, &ending_buf, s0 as u32..si as u32);
+    }
+    status.into_vec()
+}
+
+/// Bottom-to-top order of two edges `a`, `b` (indices into `edges`, sorted by
+/// [`cmp_sweep_edges`]) that are both in the sweep status at some moment.
+pub(crate) fn cmp_status(edges: &[(Point, Point)], a: u32, b: u32) -> Ordering {
+    let (ea, eb) = (edges[a as usize], edges[b as usize]);
+    if ea.0 == eb.0 {
+        // Same start: sweep order is bottom to top.
+        return a.cmp(&b);
+    }
+    // The edge starting later lies above or below the other one at its start (never on
+    // it: no vertex lies on another edge's interior).
+    if ea.0 > eb.0 {
+        orient(eb.0, eb.1, ea.0).cmp(&0).then(a.cmp(&b))
+    } else {
+        0.cmp(&orient(ea.0, ea.1, eb.0)).then(a.cmp(&b))
     }
 }
 

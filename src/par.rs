@@ -28,6 +28,94 @@ pub(crate) fn map_ranges<T: Send>(n: usize, f: impl Fn(Range<usize>) -> T + Sync
     vec![f(0..n)]
 }
 
+/// Splits `0..n` into `chunks` ranges, applies `f` to each (in parallel with the `rayon`
+/// feature) and returns the results in range order.
+pub(crate) fn map_chunks<T: Send>(
+    n: usize,
+    chunks: usize,
+    f: impl Fn(Range<usize>) -> T + Sync + Send,
+) -> Vec<T> {
+    let chunks = chunks.max(1);
+    let size = n.div_ceil(chunks).max(1);
+    let range = |k: usize| (k * size).min(n)..((k + 1) * size).min(n);
+    #[cfg(feature = "rayon")]
+    {
+        use rayon::prelude::*;
+        (0..chunks).into_par_iter().map(|k| f(range(k))).collect()
+    }
+    #[cfg(not(feature = "rayon"))]
+    {
+        (0..chunks).map(|k| f(range(k))).collect()
+    }
+}
+
+/// Concatenates the slices `part(p)` of all `parts` (copying in parallel with the `rayon`
+/// feature).
+pub(crate) fn concat<P: Sync, T: Copy + Send + Sync>(
+    parts: &[P],
+    part: impl Fn(&P) -> &[T] + Sync,
+) -> Vec<T> {
+    let mut start = Vec::with_capacity(parts.len() + 1);
+    start.push(0usize);
+    for p in parts {
+        start.push(start.last().unwrap_or(&0) + part(p).len());
+    }
+    let total = *start.last().unwrap_or(&0);
+    #[cfg(feature = "rayon")]
+    if total >= 1 << 16 && parts.len() > 1 {
+        use rayon::prelude::*;
+        let mut out = Vec::with_capacity(total);
+        (0..total)
+            .into_par_iter()
+            .with_min_len(1 << 12)
+            .map(|i| {
+                let p = start.partition_point(|&s| s <= i) - 1;
+                part(&parts[p])[i - start[p]]
+            })
+            .collect_into_vec(&mut out);
+        return out;
+    }
+    let mut out = Vec::with_capacity(total);
+    for p in parts {
+        out.extend_from_slice(part(p));
+    }
+    out
+}
+
+/// Concatenates `parts` (copying in parallel with the `rayon` feature; else freeing every
+/// part once copied).
+pub(crate) fn concat_vecs<T: Copy + Send + Sync>(parts: Vec<Vec<T>>) -> Vec<T> {
+    if parts.len() == 1 {
+        return parts.into_iter().next().unwrap_or_default();
+    }
+    #[cfg(feature = "rayon")]
+    {
+        concat(&parts, |p| &p[..])
+    }
+    #[cfg(not(feature = "rayon"))]
+    {
+        let mut out = Vec::with_capacity(parts.iter().map(|p| p.len()).sum());
+        for p in parts {
+            out.extend_from_slice(&p);
+        }
+        out
+    }
+}
+
+/// Applies `f` to every item, consuming them (in parallel with the `rayon` feature), and
+/// returns the results in item order.
+pub(crate) fn map_vec<T: Send, U: Send>(items: Vec<T>, f: impl Fn(T) -> U + Sync + Send) -> Vec<U> {
+    #[cfg(feature = "rayon")]
+    {
+        use rayon::prelude::*;
+        items.into_par_iter().map(f).collect()
+    }
+    #[cfg(not(feature = "rayon"))]
+    {
+        items.into_iter().map(f).collect()
+    }
+}
+
 /// Applies `f` to every item (in parallel with the `rayon` feature), returning the results
 /// in item order.
 #[cfg(feature = "rayon")]
@@ -46,6 +134,30 @@ pub(crate) fn map_items<T: Sync, U: Send>(
     f: impl Fn(&T) -> U + Sync + Send,
 ) -> Vec<U> {
     items.iter().map(f).collect()
+}
+
+/// Number of worker threads (1 without the `rayon` feature).
+#[cfg(feature = "rayon")]
+pub(crate) fn threads() -> usize {
+    rayon::current_num_threads().max(1)
+}
+
+/// Number of worker threads (1 without the `rayon` feature).
+#[cfg(not(feature = "rayon"))]
+pub(crate) fn threads() -> usize {
+    1
+}
+
+/// Sorts a slice of totally ordered values (in parallel with the `rayon` feature; the
+/// result does not depend on how).
+pub(crate) fn sort_unstable<T: Ord + Send>(v: &mut [T]) {
+    #[cfg(feature = "rayon")]
+    if v.len() >= 1 << 15 {
+        use rayon::prelude::*;
+        v.par_sort_unstable();
+        return;
+    }
+    v.sort_unstable();
 }
 
 /// Sorts by `cmp`, which must order primarily by `x(e)` ascending: elements are first
