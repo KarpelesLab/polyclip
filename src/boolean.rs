@@ -351,7 +351,7 @@ impl Boolean {
         let (fill, op) = (self.fill, self.op);
         let inside = move |w: [i32; 2]| op.apply(fill[0].is_inside(w[0]), fill[1].is_inside(w[1]));
         if self.clustering != Clustering::Never
-            && !ALWAYS_MONOLITHIC.load(core::sync::atomic::Ordering::Relaxed)
+            && !ALWAYS_MONOLITHIC.with(|m| m.get())
             && let Some(tree) = crate::cluster::execute(
                 &self.edges,
                 &self.ring_starts,
@@ -367,15 +367,16 @@ impl Boolean {
     }
 }
 
-static ALWAYS_MONOLITHIC: core::sync::atomic::AtomicBool =
-    core::sync::atomic::AtomicBool::new(false);
+std::thread_local! {
+    static ALWAYS_MONOLITHIC: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+}
 
-/// Makes every boolean of the process (including those inside offsets and other operations)
-/// run in one piece, as with [`Boolean::monolithic`]. The output is the same either way;
-/// for tests and benchmarks.
+/// Makes every boolean started on the current thread (including those inside offsets and
+/// other operations) run in one piece, as with [`Boolean::monolithic`]. The output is the
+/// same either way; for tests and benchmarks.
 #[doc(hidden)]
 pub fn set_always_monolithic(yes: bool) {
-    ALWAYS_MONOLITHIC.store(yes, core::sync::atomic::Ordering::Relaxed);
+    ALWAYS_MONOLITHIC.with(|m| m.set(yes));
 }
 
 /// Whether rings are split into independent clusters (see `cluster.rs`).

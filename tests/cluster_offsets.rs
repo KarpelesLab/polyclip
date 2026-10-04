@@ -1,7 +1,7 @@
 //! Offsets (whose final union usually splits into many independent clusters of raw rings)
 //! give the same result computed cluster by cluster as in one piece.
 //!
-//! A single test: it switches the process-wide setting.
+//! Uses the per-thread switch to force the one-piece computation.
 
 mod common;
 
