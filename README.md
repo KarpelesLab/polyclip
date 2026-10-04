@@ -91,6 +91,7 @@ Single thread unless noted, Apple Silicon laptop, release build (`cargo bench`,
 | cadlab GND pour (1 polygon, 2 153 holes, 242 k vertices, `testdata/`): `opening` by 100 µm | ~530 ms | ~93 ms | |
 | … the opened pour ∪ 40 small rectangles (thermal spokes) | ~9 ms | ~5 ms | |
 | … `offset` by −100 µm | ~76 ms | ~20 ms | |
+| … `clip_paths` of 500 45°/90° tracks / of one track | ~33 ms / ~1.3 ms | ~15 ms | |
 | … DRC per pad (`Prepared`, built once in ~25 ms): `intersects`, `distance_less_than` / `contains` / `distance` / `locate` | ~2 µs / ~3–6 µs / ~2–11 µs / ~1.3 µs | | |
 | … the same with the free functions (no index) | ~1 ms / ~24 ms / ~20 ms / ~0.7 ms | | |
 

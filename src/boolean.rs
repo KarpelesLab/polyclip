@@ -376,7 +376,8 @@ std::thread_local! {
 }
 
 /// Makes every boolean started on the current thread (including those inside offsets and
-/// other operations) run in one piece, as with [`Boolean::monolithic`]. The output is the
+/// other operations), and every [`clip_paths`], run in one piece, as with
+/// [`Boolean::monolithic`]. The output is the
 /// same either way; for tests and benchmarks.
 #[doc(hidden)]
 pub fn set_always_monolithic(yes: bool) {
@@ -500,6 +501,10 @@ impl<T: PathSource + ?Sized> PathSource for &T {
 /// order; consecutive vertices are never equal. Collinear vertices are kept. Each edge keeps
 /// the tag of its source edge.
 ///
+/// Only the clip rings near the paths (and the rings near those, transitively) are noded;
+/// the others are located once, so a few tracks clipped against a large zone fill cost
+/// little more than reading it. The result is identical to noding everything at once.
+///
 /// ```
 /// use polyclip::{clip_paths, FillRule, Path, Ring};
 /// let square = Ring::from([(0, 0), (10, 0), (10, 10), (0, 10)]);
@@ -513,12 +518,40 @@ pub fn clip_paths(
     clip: &(impl RingSource + ?Sized),
     rule: FillRule,
 ) -> Result<ClippedPaths> {
-    let mut eng = Boolean::new();
-    eng.add_clip(clip, rule);
-    if let Some(e) = eng.error.take() {
+    // Clip edges (as `Boolean::add_clip` lists them) and the first edge of every ring.
+    let mut n = 0usize;
+    clip.visit_rings(&mut |pts, _| n += pts.len());
+    let mut edges: Vec<InEdge> = Vec::with_capacity(n);
+    let mut ring_starts: Vec<u32> = Vec::new();
+    let mut err = None;
+    clip.visit_rings(&mut |pts, tags| {
+        ring_starts.push(edges.len() as u32);
+        if err.is_none()
+            && let Some(&p) = pts.iter().find(|p| !p.in_range())
+        {
+            err = Some(Error::CoordinateOutOfRange(p));
+        }
+        let tag = |i: usize| tags.and_then(|t| t.get(i)).copied().unwrap_or(0);
+        let mut push = |i: usize, a: Point, b: Point| {
+            if a != b {
+                edges.push(InEdge {
+                    a,
+                    b,
+                    tag: tag(i),
+                    operand: 1,
+                });
+            }
+        };
+        for (i, w) in pts.windows(2).enumerate() {
+            push(i, w[0], w[1]);
+        }
+        if let (Some(&a), Some(&b)) = (pts.last(), pts.first()) {
+            push(pts.len() - 1, a, b);
+        }
+    });
+    if let Some(e) = err {
         return Err(e);
     }
-    let mut edges = core::mem::take(&mut eng.edges);
     // Open path edges, remembering where each path starts.
     let mut path_starts: Vec<usize> = Vec::new();
     let mut err = None;
@@ -544,28 +577,22 @@ pub fn clip_paths(
     if let Some(e) = err {
         return Err(e);
     }
-    let Ok(arr) = Arrangement::build(&edges, Noding::Snap) else {
-        unreachable!("snap rounding never fails")
-    };
-    let mut inside_flag = vec![false; arr.open_frags.len()];
-    for (k, e) in arr.edges.iter().enumerate() {
-        if let Some(o) = e.open {
-            let (wb, wa) = arr.sides(k);
-            inside_flag[o as usize] = rule.is_inside(wb[1]) || rule.is_inside(wa[1]);
-        }
-    }
+    let first_open = path_starts.first().copied().unwrap_or(edges.len());
+    let frags = (!ALWAYS_MONOLITHIC.with(|m| m.get()))
+        .then(|| crate::clip::clustered(&edges, &ring_starts, first_open, &path_starts, rule))
+        .flatten()
+        .unwrap_or_else(|| clip_in_one_piece(&edges, rule));
     // Reassemble pieces per source path.
     let mut res = ClippedPaths::default();
     let mut cur: Option<(bool, TaggedPath)> = None;
     let mut path_idx = 0usize;
     let mut cur_path = usize::MAX;
-    for (k, fr) in arr.open_frags.iter().enumerate() {
-        let o = (fr.a, fr.b, edges[fr.src as usize].tag, fr.src);
+    for &(a, b, src, ins) in &frags {
+        let o = (a, b, edges[src as usize].tag, src);
         while path_idx < path_starts.len() && path_starts[path_idx] <= o.3 as usize {
             path_idx += 1;
         }
         let pid = path_idx - 1;
-        let ins = inside_flag[k];
         let cont = matches!(&cur, Some((f, p)) if *f == ins && cur_path == pid && p.points.last() == Some(&o.0));
         if !cont {
             if let Some((f, p)) = cur.take() {
@@ -596,4 +623,24 @@ pub fn clip_paths(
         }
     }
     Ok(res)
+}
+
+/// The fragments of the open edges of `edges` with their inside flags (see
+/// [`crate::clip::clustered`]), from the arrangement of all edges.
+fn clip_in_one_piece(edges: &[InEdge], rule: FillRule) -> Vec<crate::clip::OpenFrag> {
+    let Ok(arr) = Arrangement::build(edges, Noding::Snap) else {
+        unreachable!("snap rounding never fails")
+    };
+    let mut inside_flag = vec![false; arr.open_frags.len()];
+    for (k, e) in arr.edges.iter().enumerate() {
+        if let Some(o) = e.open {
+            let (wb, wa) = arr.sides(k);
+            inside_flag[o as usize] = rule.is_inside(wb[1]) || rule.is_inside(wa[1]);
+        }
+    }
+    arr.open_frags
+        .iter()
+        .zip(inside_flag)
+        .map(|(f, ins)| (f.a, f.b, f.src, ins))
+        .collect()
 }

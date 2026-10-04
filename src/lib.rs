@@ -131,6 +131,7 @@ mod arc;
 mod arrangement;
 mod assemble;
 mod boolean;
+mod clip;
 mod cluster;
 mod curved;
 mod decompose;
