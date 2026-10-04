@@ -148,11 +148,11 @@ pub fn validate_set(polys: &[Polygon]) -> Result<(), ValidityError> {
     };
     drop(segs);
     // Overlapping edges.
-    let mut fr: Vec<(Point, Point)> = frags
+    let fr: Vec<(Point, Point)> = frags
         .iter()
         .map(|f| if f.a < f.b { (f.a, f.b) } else { (f.b, f.a) })
         .collect();
-    fr.sort_unstable();
+    let fr = crate::par::bucket_sort_by_x(fr, |e| e.0.x, |a, b| a.cmp(b));
     for w in fr.windows(2) {
         if w[0] == w[1] {
             return Err(ValidityError::OverlappingEdges(w[0].0, w[0].1));
@@ -160,13 +160,28 @@ pub fn validate_set(polys: &[Polygon]) -> Result<(), ValidityError> {
     }
     drop(fr);
     // Self-touch (a ring through a point more than once) and the touch graph.
-    let mut vr: Vec<(Point, (usize, usize))> = Vec::with_capacity(frags.len() * 2);
+    // Rings numbered in (polygon, ring) order, so sorting by number sorts by ring.
+    let mut ring_ids: Vec<(usize, usize)> = ring_of_edge.clone();
+    ring_ids.dedup();
+    let mut gid_of_edge: Vec<u32> = Vec::with_capacity(ring_of_edge.len());
+    let mut g = 0u32;
+    for (k, r) in ring_of_edge.iter().enumerate() {
+        if k > 0 && ring_of_edge[k - 1] != *r {
+            g += 1;
+        }
+        gid_of_edge.push(g);
+    }
+    let mut vr: Vec<(Point, u32)> = Vec::with_capacity(frags.len() * 2);
     for f in &frags {
-        let r = ring_of_edge[f.src as usize];
+        let r = gid_of_edge[f.src as usize];
         vr.push((f.a, r));
         vr.push((f.b, r));
     }
-    vr.sort_unstable();
+    let vr = crate::par::bucket_sort_by_x(vr, |e| e.0.x, |a, b| a.cmp(b));
+    let vr: Vec<(Point, (usize, usize))> = vr
+        .into_iter()
+        .map(|(p, g)| (p, ring_ids[g as usize]))
+        .collect();
     // Union-find over rings and touch points (per polygon): a cycle means the touching
     // rings cut the interior into pieces.
     let mut uf = UnionFind::new(0);
@@ -303,11 +318,11 @@ pub fn check_canonical(polys: &[Polygon], collinear_removed: bool) -> Result<(),
     validate_set(polys)?;
     let mut shared: Vec<Point> = Vec::new();
     if collinear_removed {
-        let mut all: Vec<Point> = polys
+        let all: Vec<Point> = polys
             .iter()
             .flat_map(|p| p.rings().flat_map(|r| r.0.iter().copied()))
             .collect();
-        all.sort_unstable();
+        let all = crate::par::bucket_sort_by_x(all, |p| p.x, |a, b| a.cmp(b));
         for w in all.windows(2) {
             if w[0] == w[1] && shared.last() != Some(&w[0]) {
                 shared.push(w[0]);

@@ -200,9 +200,15 @@ pub(crate) fn bucket_sort_by_x<T: Copy + Default + Send + Sync>(
     let (lo, hi) = v
         .iter()
         .fold((i64::MAX, i64::MIN), |(l, h), e| (l.min(x(e)), h.max(x(e))));
-    let span = (hi as i128 - lo as i128 + 1) as u128;
-    let nb = (n / 8).max(1);
-    let bucket = |e: &T| ((x(e) as i128 - lo as i128) as u128 * nb as u128 / span) as usize;
+    // Buckets of 2^shift consecutive x values (any monotone bucketing gives the same
+    // sorted output), at most `n / 8` of them.
+    let span = (hi as i128 - lo as i128) as u128;
+    let mut shift = 0u32;
+    while (span >> shift) as usize >= (n / 8).max(1) {
+        shift += 1;
+    }
+    let nb = (span >> shift) as usize + 1;
+    let bucket = |e: &T| ((x(e) as i128 - lo as i128) as u128 >> shift) as usize;
     let mut start = vec![0usize; nb + 1];
     for e in &v {
         start[bucket(e) + 1] += 1;
