@@ -95,6 +95,7 @@ Single thread unless noted, Apple Silicon laptop, release build (`cargo bench`,
 | … DRC per pad (`Prepared`, built once in ~25 ms): `intersects`, `distance_less_than` / `contains` / `distance` / `locate` | ~2 µs / ~3–6 µs / ~2–11 µs / ~1.3 µs | | |
 | … the same with the free functions (no index) | ~1 ms / ~24 ms / ~20 ms / ~0.7 ms | | |
 | … `triangulate` / `triangulate_delaunay` | ~36 ms / ~83 ms | | |
+| … `ZoneFill` with the pour as zone and 500 pads: move one pad, then `result()` | ~0.15 ms | | |
 
 The noder adapts its spatial index to the data (uniform grid or k-d tree, sweeps along
 the direction in which the segments are thinnest, including the dominant segment

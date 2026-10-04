@@ -362,7 +362,7 @@ fn cadlab_ops() {
         let (d, _) = best(|| check_canonical(&fill, true).unwrap());
         println!("check_canonical:     {:8.2} ms", ms(d));
     }
-    if want("zonefill") {
+    if want("zonefill") || want("zonefill-many") {
         // The pour as the zone, pads as obstacles.
         let t = Instant::now();
         let mut z = ZoneFill::new(&fill, FillRule::NonZero).unwrap();
@@ -373,15 +373,19 @@ fn cadlab_ops() {
         std::hint::black_box(z.result());
         println!("ZoneFill build:      {:8.2} ms", ms(t.elapsed()));
         let mut s = 99u64;
+        let moves = if want("zonefill-many") { 3000 } else { 100 };
         let t = Instant::now();
-        for _ in 0..100 {
+        for _ in 0..moves {
             let id = lcg(&mut s) % 500;
             let p = &pads[500 + (lcg(&mut s) % 1500) as usize];
             z.update(id, p).unwrap();
             z.commit();
             std::hint::black_box(z.result());
         }
-        println!("ZoneFill move+result:{:8.2} us", us(t.elapsed()) / 100.0);
+        println!(
+            "ZoneFill move+result:{:8.2} us",
+            us(t.elapsed()) / moves as f64
+        );
     }
 }
 

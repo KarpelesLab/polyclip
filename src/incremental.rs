@@ -2,12 +2,12 @@
 //!
 //! See [`ZoneFill`] for the API and the exactness argument.
 
-use crate::assemble::{
-    DirEdge, RawRing, canonical_tree, link_rings, remove_collinear, rotate_to_min,
-};
+use crate::assemble::{DirEdge, RawRing, link_rings, remove_collinear, rotate_to_min};
 use crate::boolean::{FillRule, RingSource};
 use crate::error::{Error, Result};
-use crate::geom::{Point, PolyTree, Polygon, PolygonSet, Rect, Ring, TaggedPolygon, TaggedRing};
+use crate::geom::{
+    Point, PolyNode, PolyTree, Polygon, PolygonSet, Rect, Ring, TaggedPolygon, TaggedRing,
+};
 use crate::node::{Rel, relation, rounded_crossing};
 use crate::predicates::{
     cmp_angle, cmp_dir_halfplane, dist2, dot, floor_div, in_segment_interior, orient,
@@ -133,7 +133,9 @@ use std::collections::{BTreeMap, HashMap};
 /// dirty rectangles (a ring is relinked as a whole). On the 100 mm zone with 5 000
 /// obstacles, moving one obstacle takes about 0.1 ms against about 50 ms for a full
 /// recompute. Materializing the result ([`fill`](Self::fill) and friends) is linear in the
-/// output size; [`result`](Self::result) borrows a cached tree instead.
+/// output size; [`result`](Self::result) borrows a cached tree instead, rebuilt after an
+/// edit by moving the unchanged rings over from the previous one (no vertex is copied
+/// twice).
 ///
 /// The engine is `Send + Sync`, deterministic, and never panics.
 #[derive(Clone, Debug)]
@@ -150,6 +152,11 @@ pub struct ZoneFill {
     /// Segments in pending insertions (an upper bound on the next commit's growth).
     pending_segs: usize,
     tree: Option<PolyTree>,
+    /// The ring slot and stamp of every node of `tree`.
+    tree_stamps: Vec<(u32, u64)>,
+    /// The last tree with its ring slots and stamps, after a change: its unchanged rings
+    /// are moved into the next tree instead of being copied again.
+    stale: Option<(PolyTree, Vec<(u32, u64)>)>,
     rebuilds: u64,
     auto_rebuild: bool,
 }
@@ -214,6 +221,8 @@ impl ZoneFill {
             nseg_built: 0,
             pending_segs: 0,
             tree: None,
+            tree_stamps: Vec::new(),
+            stale: None,
             rebuilds: 0,
             auto_rebuild: true,
         };
@@ -404,7 +413,7 @@ impl ZoneFill {
         if changes.is_empty() {
             return;
         }
-        self.tree = None;
+        self.invalidate_tree();
         let new_total = self.nseg + add_n - rem_n.min(self.nseg + add_n);
         let big = self.auto_rebuild
             && ((add_n + rem_n) * 4 > self.nseg.max(1) * 3
@@ -529,8 +538,19 @@ impl ZoneFill {
     /// change).
     pub fn result(&mut self) -> &PolyTree {
         self.commit();
-        let st = &self.st;
-        self.tree.get_or_insert_with(|| st.tree())
+        if self.tree.is_none() {
+            let (t, stamps) = self.st.tree(self.stale.take());
+            self.tree = Some(t);
+            self.tree_stamps = stamps;
+        }
+        self.tree.get_or_insert_with(PolyTree::default)
+    }
+
+    /// Drops the cached tree, keeping it (and its ring stamps) for reuse.
+    fn invalidate_tree(&mut self) {
+        if let Some(t) = self.tree.take() {
+            self.stale = Some((t, core::mem::take(&mut self.tree_stamps)));
+        }
     }
 
     /// Applies queued changes to the stored inputs without computing anything.
@@ -557,7 +577,7 @@ impl ZoneFill {
     /// Rebuilds the whole state from the stored inputs.
     fn rebuild(&mut self) {
         self.apply_pending_to_inputs();
-        self.tree = None;
+        self.invalidate_tree();
         self.rebuilds += 1;
         let mut segs: Vec<NewSeg> = Vec::new();
         for r in &self.zone {
@@ -1001,6 +1021,8 @@ struct RingRec {
     /// Next ring split from the same closed boundary walk (circular list; itself when the
     /// walk gave one ring). Such rings are always dissolved together.
     gnext: u32,
+    /// Unique among the rings ever created by the engine (see `State::next_stamp`).
+    stamp: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -1022,6 +1044,9 @@ struct State {
     outdeg: FxMap<Point, u32>,
     rings: Vec<RingRec>,
     ring_free: Vec<u32>,
+    /// Next ring stamp: every ring created gets a new one (kept across rebuilds), so a
+    /// ring with the same stamp as a node of an earlier tree has the same vertices.
+    next_stamp: u64,
     parent: Vec<Option<u32>>,
     /// Witness rays of the rings (vertical segments), by ring id.
     wit_grid: Grid,
@@ -1109,6 +1134,7 @@ impl State {
             outdeg: FxMap::default(),
             rings: Vec::new(),
             ring_free: Vec::new(),
+            next_stamp: 0,
             parent: Vec::new(),
             wit_grid: Grid::new(extent, sh),
             wit_of: FxMap::default(),
@@ -1161,7 +1187,9 @@ impl State {
             .map(|s| Rect::new(s.a, s.b))
             .reduce(|a, b| a.union(&b));
         let sh = choose_shift(bb, input.len());
+        let stamp = st.next_stamp;
         *st = State::empty(rule, sh, bb);
+        st.next_stamp = stamp;
         st.segs.reserve(input.len());
         st.pix_map.reserve(input.len() + input.len() / 8);
         st.edge_map.reserve(input.len() + input.len() / 4);
@@ -1825,7 +1853,9 @@ impl State {
                 wit_reg: false,
                 wit_long: false,
                 gnext: NONE,
+                stamp: self.next_stamp,
             };
+            self.next_stamp += 1;
             let id = if let Some(id) = self.ring_free.pop() {
                 self.rings[id as usize] = rec;
                 id
@@ -2166,19 +2196,51 @@ impl State {
             .collect()
     }
 
-    fn tree(&self) -> PolyTree {
+    /// The canonical tree of the live rings (as `canonical_tree` builds it), with the ring
+    /// slot and stamp of every node. Rings found in `old` (same slot and stamp) are moved
+    /// from there rather than copied, and its order presorts the children lists.
+    fn tree(&self, old: Option<(PolyTree, Vec<(u32, u64)>)>) -> (PolyTree, Vec<(u32, u64)>) {
+        let (mut old_nodes, old_meta) = match old {
+            Some((t, meta)) if meta.len() == t.nodes.len() => (t.nodes, meta),
+            _ => (Vec::new(), Vec::new()),
+        };
+        let slots = if old_meta.is_empty() {
+            0
+        } else {
+            self.rings.len()
+        };
+        let mut node_of_slot = vec![NONE; slots];
+        for (n, &(slot, _)) in old_meta.iter().enumerate() {
+            if let Some(x) = node_of_slot.get_mut(slot as usize) {
+                *x = n as u32;
+            }
+        }
         let mut idx = vec![NONE; self.rings.len()];
         let mut rings: Vec<RawRing> = Vec::new();
         let mut is_hole: Vec<bool> = Vec::new();
         let mut ids: Vec<u32> = Vec::new();
+        // Position of every ring in the old tree (`NONE` for new rings).
+        let mut hint: Vec<u32> = Vec::new();
         for (i, r) in self.rings.iter().enumerate() {
             if r.live && r.real {
                 idx[i] = rings.len() as u32;
-                rings.push(r.raw.clone());
+                let n = node_of_slot.get(i).copied().unwrap_or(NONE);
+                if n != NONE && old_meta[n as usize].1 == r.stamp {
+                    let node = &mut old_nodes[n as usize];
+                    rings.push(RawRing {
+                        pts: core::mem::take(&mut node.ring.0),
+                        tags: core::mem::take(&mut node.tags),
+                    });
+                    hint.push(n);
+                } else {
+                    rings.push(r.raw.clone());
+                    hint.push(NONE);
+                }
                 is_hole.push(r.is_hole);
                 ids.push(i as u32);
             }
         }
+        drop(old_nodes);
         let parent: Vec<Option<u32>> = ids
             .iter()
             .map(|&i| {
@@ -2189,7 +2251,79 @@ impl State {
                     .and_then(|p| (idx[p as usize] != NONE).then_some(idx[p as usize]))
             })
             .collect();
-        canonical_tree(rings, &is_hole, &parent)
+        // `canonical_tree`: children (and roots) sorted stably by vertex sequence, that is
+        // by (vertex sequence, index); then depth first. Presorting by the old positions
+        // leaves the (comparison-heavy) sort little to do.
+        let m = rings.len();
+        let mut children: Vec<Vec<u32>> = vec![Vec::new(); m];
+        let mut roots: Vec<u32> = Vec::new();
+        for (r, par) in parent.iter().enumerate() {
+            match par {
+                Some(p) => children[*p as usize].push(r as u32),
+                None => roots.push(r as u32),
+            }
+        }
+        let presort = !old_meta.is_empty();
+        let order_list = |l: &mut Vec<u32>| {
+            if l.len() < 2 {
+                return;
+            }
+            if presort {
+                l.sort_unstable_by_key(|&r| hint[r as usize]);
+            }
+            l.sort_by(|&a, &b| {
+                rings[a as usize]
+                    .pts
+                    .cmp(&rings[b as usize].pts)
+                    .then(a.cmp(&b))
+            });
+        };
+        order_list(&mut roots);
+        for c in children.iter_mut() {
+            order_list(c);
+        }
+        let mut new_id = vec![0usize; m];
+        let mut order: Vec<u32> = Vec::with_capacity(m);
+        let mut stack: Vec<u32> = roots.iter().rev().copied().collect();
+        while let Some(r) = stack.pop() {
+            new_id[r as usize] = order.len();
+            order.push(r);
+            stack.extend(children[r as usize].iter().rev());
+        }
+        let mut taken: Vec<Option<RawRing>> = rings.into_iter().map(Some).collect();
+        let nodes = order
+            .iter()
+            .map(|&r| {
+                let rr = taken[r as usize].take().unwrap_or(RawRing {
+                    pts: Vec::new(),
+                    tags: Vec::new(),
+                });
+                PolyNode {
+                    ring: Ring(rr.pts),
+                    tags: rr.tags,
+                    is_hole: is_hole[r as usize],
+                    parent: parent[r as usize].map(|p| new_id[p as usize]),
+                    children: children[r as usize]
+                        .iter()
+                        .map(|&c| new_id[c as usize])
+                        .collect(),
+                }
+            })
+            .collect();
+        let meta = order
+            .iter()
+            .map(|&r| {
+                let slot = ids[r as usize];
+                (slot, self.rings[slot as usize].stamp)
+            })
+            .collect();
+        (
+            PolyTree {
+                nodes,
+                roots: roots.iter().map(|&r| new_id[r as usize]).collect(),
+            },
+            meta,
+        )
     }
 
     // ----- incremental update ------------------------------------------------------------
