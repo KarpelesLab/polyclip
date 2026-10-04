@@ -94,6 +94,7 @@ Single thread unless noted, Apple Silicon laptop, release build (`cargo bench`,
 | … `clip_paths` of 500 45°/90° tracks / of one track | ~33 ms / ~1.3 ms | ~15 ms | |
 | … DRC per pad (`Prepared`, built once in ~25 ms): `intersects`, `distance_less_than` / `contains` / `distance` / `locate` | ~2 µs / ~3–6 µs / ~2–11 µs / ~1.3 µs | | |
 | … the same with the free functions (no index) | ~1 ms / ~24 ms / ~20 ms / ~0.7 ms | | |
+| … `triangulate` / `triangulate_delaunay` | ~36 ms / ~83 ms | | |
 
 The noder adapts its spatial index to the data (uniform grid or k-d tree, sweeps along
 the direction in which the segments are thinnest, including the dominant segment

@@ -182,7 +182,7 @@ const INVALID: Error = Error::InvalidParameter(
 
 /// A boundary edge between vertices `lo < hi`; `above` is `true` when the polygon interior
 /// lies above it in the sweep status (the edge is directed `lo -> hi`).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 struct Edge {
     lo: u32,
     hi: u32,
@@ -250,15 +250,33 @@ impl Mesh {
             Ok(frags) => frags.into_iter().map(|f| (f.a, f.b)).collect(),
             Err(_) => return Err(INVALID),
         };
-        let mut verts: Vec<Point> = Vec::with_capacity(raw.len());
-        verts.extend(raw.iter().map(|e| e.0));
-        verts.sort_unstable();
-        verts.dedup();
-        let id = |p: Point| verts.binary_search(&p).unwrap_or(0) as u32;
-        let mut und: Vec<Edge> = raw
+        // Vertex ids (sorted unique points) of every edge start in one sort; an edge's end
+        // is usually the next edge's start (rings are listed in order).
+        let mut keys: Vec<(Point, u32)> = raw
             .iter()
-            .map(|&(a, b)| {
-                let (ia, ib) = (id(a), id(b));
+            .enumerate()
+            .map(|(k, e)| (e.0, k as u32))
+            .collect();
+        keys.sort_unstable();
+        let mut verts: Vec<Point> = Vec::with_capacity(raw.len());
+        let mut ida = vec![0u32; raw.len()];
+        for &(p, k) in &keys {
+            if verts.last() != Some(&p) {
+                verts.push(p);
+            }
+            ida[k as usize] = verts.len() as u32 - 1;
+        }
+        drop(keys);
+        let id = |p: Point| verts.binary_search(&p).unwrap_or(0) as u32;
+        let und: Vec<Edge> = raw
+            .iter()
+            .enumerate()
+            .map(|(k, &(_, b))| {
+                let ib = match raw.get(k + 1) {
+                    Some(n) if n.0 == b => ida[k + 1],
+                    _ => id(b),
+                };
+                let (ia, ib) = (ida[k], ib);
                 if ia < ib {
                     Edge {
                         lo: ia,
@@ -275,7 +293,13 @@ impl Mesh {
             })
             .collect();
         drop(raw);
-        und.sort_unstable_by_key(|e| (e.lo, e.hi));
+        // Sorted by (lo, hi): counting sort by `lo`, then each bucket by `hi`.
+        let und = bucket_sort(
+            und,
+            verts.len(),
+            |e| e.lo as usize,
+            |b| b.sort_unstable_by_key(|e| e.hi),
+        );
         // Cancel opposite copies of the same segment; same-direction copies overlap.
         let mut edges: Vec<Edge> = Vec::with_capacity(und.len());
         let mut i = 0;
@@ -298,10 +322,10 @@ impl Mesh {
         }
         drop(und);
         let dir = |e: &Edge| sub(verts[e.hi as usize], verts[e.lo as usize]);
-        edges.sort_by(|a, b| {
-            a.lo.cmp(&b.lo)
-                .then_with(|| cmp_dir_halfplane(dir(a), dir(b)))
-        });
+        // Already sorted by `lo`: order every run by direction (stable).
+        for run in edges.chunk_by_mut(|a, b| a.lo == b.lo) {
+            run.sort_by(|a, b| cmp_dir_halfplane(dir(a), dir(b)));
+        }
         let mut area2: i128 = 0;
         for e in &edges {
             let c = cross(verts[e.lo as usize], verts[e.hi as usize]);
@@ -785,14 +809,44 @@ fn finish(verts: Vec<Point>, mut tris: Vec<[u32; 3]>) -> Triangulation {
                 *i = r[*i as usize];
             }
         }
+        // Rotate to the smallest index first.
         let k = (0..3).min_by_key(|&k| t[k]).unwrap_or(0);
-        t.rotate_left(k);
+        *t = [t[k], t[(k + 1) % 3], t[(k + 2) % 3]];
     }
-    tris.sort_unstable();
+    let n = vertices.len();
+    let tris = bucket_sort(tris, n, |t| t[0] as usize, |b| b.sort_unstable());
     Triangulation {
         vertices,
         triangles: tris,
     }
+}
+
+/// Sorts `v` whose order starts with `key` (in `0..n`): a counting sort by `key`, then
+/// `sort` on every bucket. Gives what a full sort by that order gives.
+fn bucket_sort<T: Copy + Default>(
+    v: Vec<T>,
+    n: usize,
+    key: impl Fn(&T) -> usize,
+    sort: impl Fn(&mut [T]),
+) -> Vec<T> {
+    let mut start = vec![0u32; n + 1];
+    for x in &v {
+        start[key(x).min(n.saturating_sub(1)) + 1] += 1;
+    }
+    for i in 0..n {
+        start[i + 1] += start[i];
+    }
+    let mut out = vec![T::default(); v.len()];
+    let mut pos = start.clone();
+    for x in v {
+        let k = key(&x).min(n.saturating_sub(1));
+        out[pos[k] as usize] = x;
+        pos[k] += 1;
+    }
+    for i in 0..n {
+        sort(&mut out[start[i] as usize..start[i + 1] as usize]);
+    }
+    out
 }
 
 const NONE: u32 = u32::MAX;
@@ -802,14 +856,40 @@ fn delaunay_flip(pts: &[Point], tris: &mut [[u32; 3]]) {
     let nt = tris.len();
     // nbr[t][i]: triangle across the edge opposite corner i, NONE on the boundary.
     let mut nbr = vec![[NONE; 3]; nt];
-    let mut half: Vec<(u32, u32, u32, u8)> = Vec::with_capacity(nt * 3);
-    for (t, tri) in tris.iter().enumerate() {
+    // Half-edges `(lo, hi, triangle, corner)` in sorted order: bucketed by `lo` (counting
+    // sort), then each bucket sorted.
+    let nv = tris
+        .iter()
+        .flatten()
+        .map(|&v| v as usize + 1)
+        .max()
+        .unwrap_or(0);
+    let mut start = vec![0u32; nv + 1];
+    for tri in tris.iter() {
         for i in 0..3 {
             let (a, b) = (tri[(i + 1) % 3], tri[(i + 2) % 3]);
-            half.push((a.min(b), a.max(b), t as u32, i as u8));
+            start[a.min(b) as usize + 1] += 1;
         }
     }
-    half.sort_unstable();
+    for v in 0..nv {
+        start[v + 1] += start[v];
+    }
+    let mut half: Vec<(u32, u32, u32, u8)> = vec![(0, 0, 0, 0); nt * 3];
+    {
+        let mut pos = start.clone();
+        for (t, tri) in tris.iter().enumerate() {
+            for i in 0..3 {
+                let (a, b) = (tri[(i + 1) % 3], tri[(i + 2) % 3]);
+                let lo = a.min(b) as usize;
+                half[pos[lo] as usize] = (a.min(b), a.max(b), t as u32, i as u8);
+                pos[lo] += 1;
+            }
+        }
+    }
+    for v in 0..nv {
+        half[start[v] as usize..start[v + 1] as usize].sort_unstable();
+    }
+    drop(start);
     let mut stack: Vec<(u32, u8)> = Vec::new();
     let mut i = 0;
     while i < half.len() {
@@ -920,6 +1000,20 @@ fn incircle(a: Point, b: Point, c: Point, d: Point) -> i32 {
     let bc = bdx * cdy - bdy * cdx;
     let ca = cdx * ady - cdy * adx;
     let ab = adx * bdy - ady * bdx;
+    // Differences below 2^30: lifts and cross products below 2^61, so the determinant
+    // (below 2^124) is exact in `i128`.
+    const SMALL: i128 = 1 << 30;
+    if [adx, ady, bdx, bdy, cdx, cdy]
+        .iter()
+        .all(|v| v.abs() < SMALL)
+    {
+        return (alift * bc + blift * ca + clift * ab).signum() as i32;
+    }
+    incircle_wide(alift, blift, clift, bc, ca, ab)
+}
+
+/// The in-circle determinant `alift * bc + blift * ca + clift * ab` in 256 bits.
+fn incircle_wide(alift: i128, blift: i128, clift: i128, bc: i128, ca: i128, ab: i128) -> i32 {
     let s = I256::mul(alift, bc)
         .add(I256::mul(blift, ca))
         .add(I256::mul(clift, ab));
@@ -994,6 +1088,367 @@ mod tests {
 
     fn rect(x0: i64, y0: i64, x1: i64, y1: i64) -> Ring {
         ring(&[(x0, y0), (x1, y0), (x1, y1), (x0, y1)])
+    }
+
+    // The implementation before the bucket sorts and the narrow exact in-circle path, kept
+    // to check that the current one gives identical triangulations.
+    use crate::query::ring_area2;
+
+    fn build_ref(polys: &[Polygon]) -> Result<Mesh> {
+        let mut total = 0usize;
+        for poly in polys {
+            for ring in poly.rings() {
+                for &p in ring.iter() {
+                    if !p.in_range() {
+                        return Err(Error::CoordinateOutOfRange(p));
+                    }
+                }
+                total += ring.len();
+            }
+        }
+        if total > u32::MAX as usize {
+            return Err(Error::TooLarge);
+        }
+        // Directed edges, interior on the left.
+        let mut raw: Vec<(Point, Point)> = Vec::with_capacity(total);
+        let mut ring_buf: Vec<Point> = Vec::new();
+        for poly in polys {
+            for (ri, ring) in poly.rings().enumerate() {
+                ring_buf.clear();
+                for &p in ring.iter() {
+                    if ring_buf.last() != Some(&p) {
+                        ring_buf.push(p);
+                    }
+                }
+                while ring_buf.len() > 1 && ring_buf.first() == ring_buf.last() {
+                    ring_buf.pop();
+                }
+                if ring_buf.len() < 3 {
+                    continue;
+                }
+                let a = ring_area2(&ring_buf);
+                if a == 0 {
+                    continue;
+                }
+                let flip = (ri == 0) != (a > 0);
+                let n = ring_buf.len();
+                for i in 0..n {
+                    let (p, q) = (ring_buf[i], ring_buf[(i + 1) % n]);
+                    raw.push(if flip { (q, p) } else { (p, q) });
+                }
+            }
+        }
+        // Split edges at vertices lying on their interiors (exactly), so that partially
+        // shared edges become identical pieces that cancel below. Proper crossings mean
+        // invalid input.
+        let raw: Vec<(Point, Point)> = match crate::node::node_exact(&raw) {
+            Ok(frags) => frags.into_iter().map(|f| (f.a, f.b)).collect(),
+            Err(_) => return Err(INVALID),
+        };
+        let mut verts: Vec<Point> = Vec::with_capacity(raw.len());
+        verts.extend(raw.iter().map(|e| e.0));
+        verts.sort_unstable();
+        verts.dedup();
+        let id = |p: Point| verts.binary_search(&p).unwrap_or(0) as u32;
+        let mut und: Vec<Edge> = raw
+            .iter()
+            .map(|&(a, b)| {
+                let (ia, ib) = (id(a), id(b));
+                if ia < ib {
+                    Edge {
+                        lo: ia,
+                        hi: ib,
+                        above: true,
+                    }
+                } else {
+                    Edge {
+                        lo: ib,
+                        hi: ia,
+                        above: false,
+                    }
+                }
+            })
+            .collect();
+        drop(raw);
+        und.sort_unstable_by_key(|e| (e.lo, e.hi));
+        // Cancel opposite copies of the same segment; same-direction copies overlap.
+        let mut edges: Vec<Edge> = Vec::with_capacity(und.len());
+        let mut i = 0;
+        while i < und.len() {
+            let mut j = i;
+            let mut net = 0i64;
+            while j < und.len() && und[j].lo == und[i].lo && und[j].hi == und[i].hi {
+                net += if und[j].above { 1 } else { -1 };
+                j += 1;
+            }
+            match net {
+                0 => {}
+                1 | -1 => edges.push(Edge {
+                    above: net > 0,
+                    ..und[i]
+                }),
+                _ => return Err(INVALID),
+            }
+            i = j;
+        }
+        drop(und);
+        let dir = |e: &Edge| sub(verts[e.hi as usize], verts[e.lo as usize]);
+        edges.sort_by(|a, b| {
+            a.lo.cmp(&b.lo)
+                .then_with(|| cmp_dir_halfplane(dir(a), dir(b)))
+        });
+        let mut area2: i128 = 0;
+        for e in &edges {
+            let c = cross(verts[e.lo as usize], verts[e.hi as usize]);
+            area2 += if e.above { c } else { -c };
+        }
+        Ok(Mesh {
+            verts,
+            edges,
+            area2,
+        })
+    }
+
+    fn finish_ref(verts: Vec<Point>, mut tris: Vec<[u32; 3]>) -> Triangulation {
+        let mut used = vec![false; verts.len()];
+        for t in &tris {
+            for &i in t {
+                used[i as usize] = true;
+            }
+        }
+        let (vertices, remap) = if used.iter().all(|&u| u) {
+            (verts, None)
+        } else {
+            let mut remap = vec![0u32; verts.len()];
+            let mut out = Vec::with_capacity(verts.len());
+            for (i, p) in verts.into_iter().enumerate() {
+                if used[i] {
+                    remap[i] = out.len() as u32;
+                    out.push(p);
+                }
+            }
+            (out, Some(remap))
+        };
+        for t in &mut tris {
+            if let Some(r) = &remap {
+                for i in t.iter_mut() {
+                    *i = r[*i as usize];
+                }
+            }
+            let k = (0..3).min_by_key(|&k| t[k]).unwrap_or(0);
+            t.rotate_left(k);
+        }
+        tris.sort_unstable();
+        Triangulation {
+            vertices,
+            triangles: tris,
+        }
+    }
+
+    fn delaunay_flip_ref(pts: &[Point], tris: &mut [[u32; 3]]) {
+        let nt = tris.len();
+        // nbr[t][i]: triangle across the edge opposite corner i, NONE on the boundary.
+        let mut nbr = vec![[NONE; 3]; nt];
+        let mut half: Vec<(u32, u32, u32, u8)> = Vec::with_capacity(nt * 3);
+        for (t, tri) in tris.iter().enumerate() {
+            for i in 0..3 {
+                let (a, b) = (tri[(i + 1) % 3], tri[(i + 2) % 3]);
+                half.push((a.min(b), a.max(b), t as u32, i as u8));
+            }
+        }
+        half.sort_unstable();
+        let mut stack: Vec<(u32, u8)> = Vec::new();
+        let mut i = 0;
+        while i < half.len() {
+            let mut j = i;
+            while j < half.len() && half[j].0 == half[i].0 && half[j].1 == half[i].1 {
+                j += 1;
+            }
+            if j - i == 2 {
+                let (_, _, t, a) = half[i];
+                let (_, _, u, b) = half[i + 1];
+                nbr[t as usize][a as usize] = u;
+                nbr[u as usize][b as usize] = t;
+                stack.push((t, a));
+            }
+            i = j;
+        }
+        drop(half);
+        stack.reverse();
+        while let Some((t, i)) = stack.pop() {
+            let (t, i) = (t as usize, i as usize);
+            let u = nbr[t][i];
+            if u == NONE {
+                continue;
+            }
+            let u = u as usize;
+            let Some(j) = (0..3).find(|&j| nbr[u][j] == t as u32) else {
+                continue;
+            };
+            let (a, b, c) = (tris[t][i], tris[t][(i + 1) % 3], tris[t][(i + 2) % 3]);
+            let d = tris[u][j];
+            if tris[u][(j + 1) % 3] != c || tris[u][(j + 2) % 3] != b {
+                continue;
+            }
+            let (pa, pb, pc, pd) = (
+                pts[a as usize],
+                pts[b as usize],
+                pts[c as usize],
+                pts[d as usize],
+            );
+            if incircle_ref(pa, pb, pc, pd) <= 0
+                || orient(pa, pb, pd) <= 0
+                || orient(pa, pd, pc) <= 0
+            {
+                continue;
+            }
+            let n_ab = nbr[t][(i + 2) % 3];
+            let n_ca = nbr[t][(i + 1) % 3];
+            let n_bd = nbr[u][(j + 1) % 3];
+            let n_dc = nbr[u][(j + 2) % 3];
+            tris[t] = [a, b, d];
+            nbr[t] = [n_bd, u as u32, n_ab];
+            tris[u] = [a, d, c];
+            nbr[u] = [n_dc, n_ca, t as u32];
+            if n_bd != NONE {
+                for x in nbr[n_bd as usize].iter_mut() {
+                    if *x == u as u32 {
+                        *x = t as u32;
+                    }
+                }
+            }
+            if n_ca != NONE {
+                for x in nbr[n_ca as usize].iter_mut() {
+                    if *x == t as u32 {
+                        *x = u as u32;
+                    }
+                }
+            }
+            stack.push((t as u32, 0));
+            stack.push((t as u32, 2));
+            stack.push((u as u32, 0));
+            stack.push((u as u32, 1));
+        }
+    }
+
+    /// Exact in-circle test: positive when `d` lies strictly inside the circumcircle of the
+    /// counter-clockwise triangle `abc`, zero when co-circular, negative outside.
+    fn incircle_ref(a: Point, b: Point, c: Point, d: Point) -> i32 {
+        let adx = (a.x - d.x) as i128;
+        let ady = (a.y - d.y) as i128;
+        let bdx = (b.x - d.x) as i128;
+        let bdy = (b.y - d.y) as i128;
+        let cdx = (c.x - d.x) as i128;
+        let cdy = (c.y - d.y) as i128;
+        // Floating-point filter (Shewchuk's bound for the translated determinant). The
+        // differences (|v| <= 2^41) are exact in f64.
+        {
+            let (fadx, fady, fbdx, fbdy, fcdx, fcdy) = (
+                adx as f64, ady as f64, bdx as f64, bdy as f64, cdx as f64, cdy as f64,
+            );
+            let alift = fadx * fadx + fady * fady;
+            let blift = fbdx * fbdx + fbdy * fbdy;
+            let clift = fcdx * fcdx + fcdy * fcdy;
+            let bc = fbdx * fcdy - fbdy * fcdx;
+            let ca = fcdx * fady - fcdy * fadx;
+            let ab = fadx * fbdy - fady * fbdx;
+            let det = alift * bc + blift * ca + clift * ab;
+            let perm = alift * ((fbdx * fcdy).abs() + (fbdy * fcdx).abs())
+                + blift * ((fcdx * fady).abs() + (fcdy * fadx).abs())
+                + clift * ((fadx * fbdy).abs() + (fady * fbdx).abs());
+            let bound = 4e-15 * perm;
+            if det > bound {
+                return 1;
+            }
+            if det < -bound {
+                return -1;
+            }
+        }
+        let alift = adx * adx + ady * ady;
+        let blift = bdx * bdx + bdy * bdy;
+        let clift = cdx * cdx + cdy * cdy;
+        let bc = bdx * cdy - bdy * cdx;
+        let ca = cdx * ady - cdy * adx;
+        let ab = adx * bdy - ady * bdx;
+        let s = I256::mul(alift, bc)
+            .add(I256::mul(blift, ca))
+            .add(I256::mul(clift, ab));
+        s.signum()
+    }
+
+    fn triangulate_ref(polys: &[Polygon], delaunay: bool) -> Result<Triangulation> {
+        let mesh = build_ref(polys)?;
+        let mut tris = mesh.sweep(CHUNK)?;
+        if delaunay {
+            delaunay_flip_ref(&mesh.verts, &mut tris);
+        }
+        Ok(finish_ref(mesh.verts, tris))
+    }
+
+    #[test]
+    fn same_as_reference() {
+        let mut s: u64 = 0xdead;
+        let mut rnd = |m: i64| {
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((s >> 33) as i64).rem_euclid(m)
+        };
+        let mut nonempty = 0;
+        for it in 0..3000 {
+            // A frame minus random rectangles and triangles (valid, many cocircular
+            // points), at small and large scales; or raw rings (often invalid).
+            let scale = [1i64, 1000, 1 << 32][it % 3];
+            let frame = rect(0, 0, 40 * scale, 40 * scale);
+            let k = 1 + rnd(12) as usize;
+            let holes: Vec<Ring> = (0..k)
+                .map(|_| {
+                    let (x, y) = (rnd(36) * scale, rnd(36) * scale);
+                    if rnd(3) == 0 {
+                        ring(&[
+                            (x, y),
+                            (x + rnd(6) * scale + scale, y),
+                            (x, y + rnd(6) * scale + scale),
+                        ])
+                    } else {
+                        rect(x, y, x + (1 + rnd(5)) * scale, y + (1 + rnd(5)) * scale)
+                    }
+                })
+                .collect();
+            let polys: Vec<Polygon> = if it % 5 == 4 {
+                (0..1 + rnd(3))
+                    .map(|_| {
+                        let v: Vec<(i64, i64)> = (0..3 + rnd(6))
+                            .map(|_| (rnd(20) * scale, rnd(20) * scale))
+                            .collect();
+                        Polygon::new(ring(&v), vec![])
+                    })
+                    .collect()
+            } else {
+                crate::boolean::boolean(
+                    crate::boolean::Op::Difference,
+                    &frame,
+                    &holes,
+                    crate::boolean::FillRule::NonZero,
+                )
+                .unwrap()
+            };
+            for delaunay in [false, true] {
+                let (a, b) = if delaunay && polys.len() == 1 {
+                    (
+                        triangulate_delaunay(&polys[0]),
+                        triangulate_ref(&polys, true),
+                    )
+                } else if delaunay {
+                    continue;
+                } else {
+                    (triangulate_set(&polys), triangulate_ref(&polys, false))
+                };
+                nonempty += a.as_ref().is_ok_and(|t| !t.triangles.is_empty()) as usize;
+                assert_eq!(a, b, "{polys:?}");
+            }
+        }
+        assert!(nonempty > 1000);
     }
 
     /// Canonically oriented, duplicate-free directed boundary edges of a polygon set.

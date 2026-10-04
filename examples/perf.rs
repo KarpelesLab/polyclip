@@ -329,13 +329,24 @@ fn cadlab_ops() {
     }
     if want("triangulate") {
         let (d, t) = best(|| triangulate_set(&fill).unwrap());
+        let hash = |t: &Triangulation| {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            t.hash(&mut h);
+            h.finish()
+        };
         println!(
-            "triangulate:         {:8.2} ms ({} triangles)",
+            "triangulate:         {:8.2} ms ({} triangles, checksum {:x})",
             ms(d),
-            t.triangles.len()
+            t.triangles.len(),
+            hash(&t)
         );
-        let (d, _) = best(|| triangulate_delaunay(&fill[0]).unwrap());
-        println!("triangulate_delaunay:{:8.2} ms", ms(d));
+        let (d, t) = best(|| triangulate_delaunay(&fill[0]).unwrap());
+        println!(
+            "triangulate_delaunay:{:8.2} ms (checksum {:x})",
+            ms(d),
+            hash(&t)
+        );
     }
     if want("simplify") {
         let (d, r) = best(|| simplify_polygons(&fill, 5_000));
