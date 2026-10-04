@@ -304,14 +304,17 @@ fn strictly_between(p: Point, x: Point, d: Point) -> bool {
     ccw_from(p, p, d) == Ordering::Less && ccw_from(p, d, x) == Ordering::Less
 }
 
-/// Uniform grid over a bounding box; each cell lists ids.
+/// Uniform grid over a bounding box; each cell lists ids: those given when the grid was
+/// filled (compactly, in `items[start[c]..start[c + 1]]`), then those added later.
 struct Grid {
     x0: i64,
     y0: i64,
     s: i64,
     nx: i64,
     ny: i64,
-    cells: Vec<Vec<u32>>,
+    start: Vec<u32>,
+    items: Vec<u32>,
+    extra: Vec<Vec<u32>>,
 }
 
 impl Grid {
@@ -328,14 +331,42 @@ impl Grid {
         };
         let nx = bb.width() / s + 1;
         let ny = bb.height() / s + 1;
+        let nc = (nx * ny) as usize;
         Grid {
             x0: bb.min.x,
             y0: bb.min.y,
             s,
             nx,
             ny,
-            cells: vec![Vec::new(); (nx * ny) as usize],
+            start: vec![0; nc + 1],
+            items: Vec::new(),
+            extra: vec![Vec::new(); nc],
         }
+    }
+
+    /// Fills the (empty) grid with `(cell, id)` pairs, keeping their order within a cell.
+    fn fill(&mut self, pairs: &[(u32, u32)]) {
+        for &(c, _) in pairs {
+            self.start[c as usize + 1] += 1;
+        }
+        for c in 0..self.extra.len() {
+            self.start[c + 1] += self.start[c];
+        }
+        let mut pos = self.start.clone();
+        self.items = vec![0; pairs.len()];
+        for &(c, id) in pairs {
+            self.items[pos[c as usize] as usize] = id;
+            pos[c as usize] += 1;
+        }
+    }
+
+    /// The ids listed in cell `c`.
+    #[inline]
+    fn cell(&self, c: usize) -> impl Iterator<Item = u32> + '_ {
+        self.items[self.start[c] as usize..self.start[c + 1] as usize]
+            .iter()
+            .chain(self.extra[c].iter())
+            .copied()
     }
 
     #[inline]
@@ -480,21 +511,23 @@ impl Simplifier {
         let mut anchors = Grid::new(bb, base);
         let mut edges = Vec::with_capacity(base + base / 4);
         let mut buf = Vec::new();
+        let mut anchor_pairs: Vec<(u32, u32)> = Vec::with_capacity(rings.len());
+        let mut pairs: Vec<(u32, u32)> = Vec::with_capacity(base + base / 2);
         for (ri, r) in rings.iter().enumerate() {
             if r.n > 0 {
-                let c = anchors.cell_of(r.pts[0]);
-                anchors.cells[c].push(ri as u32);
+                anchor_pairs.push((anchors.cell_of(r.pts[0]) as u32, ri as u32));
             }
             for k in 0..r.n {
                 let (a, b) = (r.pts[k], r.pts[k + 1]);
                 let id = edges.len() as u32;
                 edges.push(Edge { a, b, alive: true });
                 grid.segment_cells(a, b, &mut buf);
-                for &c in &buf {
-                    grid.cells[c].push(id);
-                }
+                pairs.extend(buf.iter().map(|&c| (c as u32, id)));
             }
         }
+        anchors.fill(&anchor_pairs);
+        grid.fill(&pairs);
+        drop(pairs);
         // Pinned vertices: shared with another vertex, lying on another edge, or ends of an
         // edge another vertex lies on.
         let mut pinned = vec![false; base];
@@ -506,7 +539,7 @@ impl Simplifier {
                 edge_ring.push(ri);
             }
         }
-        all.sort_unstable();
+        let all = crate::par::bucket_sort_by_x(all, |e| e.0.x, |a, b| a.cmp(b));
         let mut i = 0;
         while i < all.len() {
             let mut j = i + 1;
@@ -521,9 +554,11 @@ impl Simplifier {
             i = j;
         }
         for &(q, g) in &all {
-            for &e in &grid.cells[grid.cell_of(q)] {
+            for e in grid.cell(grid.cell_of(q)) {
                 let e = e as usize;
-                if in_segment_interior(edges[e].a, edges[e].b, q) {
+                let (a, b) = (edges[e].a, edges[e].b);
+                // (The box test first: most edges of the cell are far from `q`.)
+                if Rect::new(a, b).contains_point(q) && in_segment_interior(a, b, q) {
                     pinned[g] = true;
                     let r = &rings[edge_ring[e]];
                     pinned[e] = true;
@@ -623,7 +658,7 @@ impl Simplifier {
         let (lo, hi) = (ring.base + i, ring.base + j);
         grid.segment_cells(a, b, buf);
         for &c in buf.iter() {
-            for &e in &grid.cells[c] {
+            for e in grid.cell(c) {
                 let e = e as usize;
                 if stamps[e] == st {
                     continue;
@@ -649,7 +684,7 @@ impl Simplifier {
             }
             let v = ring.pts[k];
             let (p, u, s) = (sub(other, v), sub(old, v), sub(new, v));
-            for &e in &grid.cells[grid.cell_of(v)] {
+            for e in grid.cell(grid.cell_of(v)) {
                 let e = e as usize;
                 let ed = &edges[e];
                 if !ed.alive || (lo..hi).contains(&e) || !on_segment(ed.a, ed.b, v) {
@@ -696,8 +731,8 @@ impl Simplifier {
         } else {
             for row in r0..=r1 {
                 for col in c0..=c1 {
-                    let cell = &anchors.cells[(row * anchors.nx + col) as usize];
-                    if !cell.iter().all(|&r2| check(r2 as usize)) {
+                    let mut cell = anchors.cell((row * anchors.nx + col) as usize);
+                    if !cell.all(|r2| check(r2 as usize)) {
                         return split;
                     }
                 }
@@ -717,7 +752,7 @@ impl Simplifier {
         stamps.push(0);
         grid.segment_cells(a, b, buf);
         for &c in buf.iter() {
-            grid.cells[c].push(id);
+            grid.extra[c].push(id);
         }
         None
     }
@@ -798,6 +833,48 @@ mod tests {
 
     fn ring(v: &[(i64, i64)]) -> Ring {
         v.iter().map(|&(x, y)| p(x, y)).collect()
+    }
+
+    /// The compact grid lists the same ids in the same order as one vector per cell (the
+    /// previous layout), including ids added after filling.
+    #[test]
+    fn grid_matches_vector_per_cell() {
+        let mut s: u64 = 17;
+        let mut rnd = |m: i64| {
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((s >> 33) as i64).rem_euclid(m)
+        };
+        for it in 0..200 {
+            let range = [10i64, 1000, 1 << 40][it % 3];
+            let segs: Vec<(Point, Point)> = (0..1 + rnd(300))
+                .map(|_| (p(rnd(range), rnd(range)), p(rnd(range), rnd(range))))
+                .collect();
+            let bb = Rect::new(p(0, 0), p(range, range));
+            let mut g = Grid::new(bb, segs.len() / 2);
+            let mut reference: Vec<Vec<u32>> = vec![Vec::new(); g.extra.len()];
+            let (mut buf, mut pairs) = (Vec::new(), Vec::new());
+            let first = segs.len() * 2 / 3;
+            for (id, &(a, b)) in segs[..first].iter().enumerate() {
+                g.segment_cells(a, b, &mut buf);
+                for &c in &buf {
+                    pairs.push((c as u32, id as u32));
+                    reference[c].push(id as u32);
+                }
+            }
+            g.fill(&pairs);
+            for (id, &(a, b)) in segs.iter().enumerate().skip(first) {
+                g.segment_cells(a, b, &mut buf);
+                for &c in &buf {
+                    g.extra[c].push(id as u32);
+                    reference[c].push(id as u32);
+                }
+            }
+            for (c, want) in reference.iter().enumerate() {
+                assert_eq!(&g.cell(c).collect::<Vec<_>>(), want);
+            }
+        }
     }
 
     /// A CCW square of side `s` at `(x0, y0)` whose edges carry inward zig-zag noise of

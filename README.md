@@ -97,6 +97,7 @@ Single thread unless noted, Apple Silicon laptop, release build (`cargo bench`,
 | … `triangulate` / `triangulate_delaunay` | ~36 ms / ~83 ms | | |
 | … `ZoneFill` with the pour as zone and 500 pads: move one pad, then `result()` | ~0.15 ms | | |
 | … `validate_set` / `check_canonical` | ~39 ms / ~42 ms | | |
+| … `simplify_polygons` with 5 µm / 50 µm tolerance | ~40 ms / ~29 ms | | |
 
 The noder adapts its spatial index to the data (uniform grid or k-d tree, sweeps along
 the direction in which the segments are thinnest, including the dominant segment

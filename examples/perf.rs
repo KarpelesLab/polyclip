@@ -167,6 +167,11 @@ fn cadlab_ops() {
     );
     let tracks = corpus_tracks(b, 500, 11);
     let pads = corpus_pads(b, 2000, 12);
+    if want("clip500") {
+        for _ in 0..20 {
+            std::hint::black_box(clip_paths(&tracks, &fill, FillRule::NonZero).unwrap());
+        }
+    }
     if want("clip1") {
         for _ in 0..300 {
             std::hint::black_box(clip_paths(&tracks[..1], &fill, FillRule::NonZero).unwrap());
@@ -351,9 +356,17 @@ fn cadlab_ops() {
     if want("simplify") {
         let (d, r) = best(|| simplify_polygons(&fill, 5_000));
         println!(
-            "simplify(5 um):      {:8.2} ms ({} verts)",
+            "simplify(5 um):      {:8.2} ms ({} verts, checksum {:x})",
             ms(d),
-            r.iter().map(|p| p.vertex_count()).sum::<usize>()
+            r.iter().map(|p| p.vertex_count()).sum::<usize>(),
+            checksum(&r)
+        );
+        let (d, r) = best(|| simplify_polygons(&fill, 50_000));
+        println!(
+            "simplify(50 um):     {:8.2} ms ({} verts, checksum {:x})",
+            ms(d),
+            r.iter().map(|p| p.vertex_count()).sum::<usize>(),
+            checksum(&r)
         );
     }
     if want("validate") {
