@@ -79,7 +79,7 @@ Single thread unless noted, Apple Silicon laptop, release build (`cargo bench`,
 | Workload | polyclip | with `rayon` | Clipper2 (C++) |
 |---|---|---|---|
 | zone 100 mm × 100 mm − 5 000 inflated obstacles | ~25 ms | ~8 ms | ~41 ms |
-| union of 50 000 heavily overlapping 64-vertex circles | ~3.2 s | ~2.3 s | ~157 s |
+| union of 50 000 heavily overlapping 64-vertex circles | ~2.8 s | ~0.4 s | ~157 s |
 | offset of a 10 000-vertex polygon (round joins), convex | ~1.2 ms | | ~0.9 ms |
 | offset of a 10 000-vertex wavy star | ~21 ms | | |
 | `distance_less_than`, 64-vertex polygons (average incl. bbox rejection) | ~80 ns | | |
@@ -97,15 +97,18 @@ hierarchies, so long, dense or parallel edges at any angle do not degrade into q
 behaviour. Booleans split their input into clusters of rings that cannot interact (no edge
 boxes within a unit of each other) and compute each on its own, in parallel with `rayon`;
 a lone simple ring is only located and passed through, so a small operand meeting a few
-rings of a large one costs little more than reading it. The output is identical to
-computing everything at once. Offsets build their raw curves in parallel with `rayon`, and a
+rings of a large one costs little more than reading it. Within one large cluster, every
+phase runs in parallel with `rayon`: noding by leaf and segment ranges, fragment merging by
+`x` ranges, and the sweep in vertical bands joined at their common sides. The output is
+identical to computing everything at once, on any number of threads. Offsets build their raw curves in parallel with `rayon`, and a
 single raw curve that is already simple (a convex polygon grown, say) is passed through
 without noding.
 
 ## Limitations
 
 - The spec's indicative target for the union of 50 000 heavily overlapping circles
-  (< 300 ms) is not met (~3 s single-threaded; Clipper2 needs minutes on the same input).
+  (< 300 ms) is met only roughly, and only with `rayon` on many cores (~0.4 s on 16; ~2.8 s
+  single-threaded; Clipper2 needs minutes on the same input).
   Realistic zone fills, offsets and distance queries meet their targets.
 - `curved_boolean` returns real arcs (source centre and radius) with a documented
   deviation bound and side guarantee, but it is built on approximation plus
@@ -115,15 +118,16 @@ without noding.
 ## Feature flags
 
 - `serde`: `Serialize`/`Deserialize` for all data types.
-- `rayon`: parallelize the heavy phases of boolean operations, and independent clusters of
-  rings. Output is identical for any number of threads.
+- `rayon`: parallelize the heavy phases of boolean operations (noding, merging and the
+  sweep within one cluster), and independent clusters of rings. Output is identical for any
+  number of threads.
 
 ## Verification
 
 - Property tests (`proptest`) for boolean identities, validity and canonical form,
   idempotence, offsets, distances, fracture, simplification, triangulation and
   decomposition; clustered booleans are checked bit for bit against the one-piece
-  computation.
+  computation, and the parallel boolean engine against the original sequential one.
 - Differential testing against Clipper2 (as an oracle only) in the separate `oracle/`
   crate.
 - Fuzzing of every public operation with `cargo-fuzz` (`fuzz/`), run weekly in CI.

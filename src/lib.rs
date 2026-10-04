@@ -120,8 +120,9 @@
 //! # Features
 //!
 //! * `serde`: `Serialize`/`Deserialize` for all data types.
-//! * `rayon`: parallelize the heavy phases of booleans (pair search, leaf processing, large
-//!   sorts). Results are identical to the sequential build, for any number of threads.
+//! * `rayon`: parallelize the heavy phases of booleans (noding, fragment merging and the
+//!   sweep, by ranges of leaves, segments and vertical bands, as well as independent clusters
+//!   of rings). Results are identical to the sequential build, for any number of threads.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
