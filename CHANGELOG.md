@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.5](https://github.com/KarpelesLab/polyclip/compare/v0.0.4...v0.0.5) - 2026-10-04
+
+### Other
+
+- make the one-piece boolean switch thread-local
+- check clustered booleans against the one-piece computation
+- compute booleans cluster by cluster, lone simple rings directly
+- skip normalizing canonical input in offsets; fused opening/closing
+- add cadlab GND_In1 zone fill corpus with benchmark
+
 ## [0.0.4](https://github.com/KarpelesLab/polyclip/compare/v0.0.3...v0.0.4) - 2026-10-03
 
 ### Added
