@@ -77,6 +77,13 @@ pub type VertexVisitor<'a> = dyn FnMut(&[Point], Option<&[u64]>) + 'a;
 pub trait RingSource {
     /// Calls `f(points, tags)` for every ring. `tags`, when present, has one tag per edge.
     fn visit_rings(&self, f: &mut VertexVisitor<'_>);
+
+    /// When the source is made only of [`Polygon`]s (untagged), calls `f` on each and
+    /// returns `true`; otherwise returns `false` (possibly after some calls). Lets operations
+    /// detect already canonical input and skip re-normalizing it.
+    fn visit_polygons<'a>(&'a self, _f: &mut dyn FnMut(&'a Polygon)) -> bool {
+        false
+    }
 }
 
 impl RingSource for Ring {
@@ -103,6 +110,10 @@ impl RingSource for Polygon {
             f(&r.0, None)
         }
     }
+    fn visit_polygons<'a>(&'a self, f: &mut dyn FnMut(&'a Polygon)) -> bool {
+        f(self);
+        true
+    }
 }
 
 impl RingSource for TaggedPolygon {
@@ -128,11 +139,17 @@ impl<T: RingSource> RingSource for [T] {
             x.visit_rings(f)
         }
     }
+    fn visit_polygons<'a>(&'a self, f: &mut dyn FnMut(&'a Polygon)) -> bool {
+        self.iter().all(|x| x.visit_polygons(f))
+    }
 }
 
 impl<T: RingSource> RingSource for Vec<T> {
     fn visit_rings(&self, f: &mut VertexVisitor<'_>) {
         self.as_slice().visit_rings(f)
+    }
+    fn visit_polygons<'a>(&'a self, f: &mut dyn FnMut(&'a Polygon)) -> bool {
+        self.as_slice().visit_polygons(f)
     }
 }
 
@@ -140,11 +157,17 @@ impl<T: RingSource, const N: usize> RingSource for [T; N] {
     fn visit_rings(&self, f: &mut VertexVisitor<'_>) {
         self.as_slice().visit_rings(f)
     }
+    fn visit_polygons<'a>(&'a self, f: &mut dyn FnMut(&'a Polygon)) -> bool {
+        self.as_slice().visit_polygons(f)
+    }
 }
 
 impl<T: RingSource + ?Sized> RingSource for &T {
     fn visit_rings(&self, f: &mut VertexVisitor<'_>) {
         (**self).visit_rings(f)
+    }
+    fn visit_polygons<'a>(&'a self, f: &mut dyn FnMut(&'a Polygon)) -> bool {
+        (**self).visit_polygons(f)
     }
 }
 

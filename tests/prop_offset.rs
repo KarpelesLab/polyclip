@@ -35,6 +35,24 @@ proptest! {
     }
 
     #[test]
+    fn canonical_fast_path_matches(a in rings(10_000, 3, 9), d in -3000i64..3000, j in join()) {
+        // Canonical input skips normalization; rotating a ring start defeats the check
+        // and must not change the result.
+        let tol = ArcTol::new(20, Side::Outside);
+        let norm = union_all(&a, FillRule::NonZero).unwrap();
+        let fast = offset(&norm, d, j, tol).unwrap();
+        let mut rot = norm.clone();
+        if let Some(p) = rot.first_mut() { p.outer.rotate_left(1); }
+        prop_assert_eq!(&fast, &offset(&rot, d, j, tol).unwrap());
+        let tree = Boolean::new().subject(&norm, FillRule::NonZero).execute_tree().unwrap();
+        prop_assert_eq!(&fast, &offset(&tree, d, j, tol).unwrap());
+        if d > 0 {
+            prop_assert_eq!(opening(&norm, d, tol).unwrap(), offset(&offset(&rot, -d, Join::Round, tol).unwrap(), d, Join::Round, tol).unwrap());
+            prop_assert_eq!(closing(&norm, d, tol).unwrap(), offset(&offset(&rot, d, Join::Round, tol).unwrap(), -d, Join::Round, tol).unwrap());
+        }
+    }
+
+    #[test]
     fn grow_then_shrink_contains(a in rings(10_000, 3, 8), d in 1i64..2000) {
         // Closing (grow then shrink with round joins) contains the original up to
         // tolerance and rounding. Rounding moves edges by < 1 unit, which near a very sharp

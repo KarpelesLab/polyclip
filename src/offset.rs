@@ -18,7 +18,7 @@ use crate::arc::Shape;
 use crate::arc::{ArcTol, Circle, arc_points, round_pt};
 use crate::boolean::{Boolean, FillRule, PathSource, RingSource};
 use crate::error::{Error, Result};
-use crate::geom::{Point, PolyTree, PolygonSet, Ring, TaggedRing};
+use crate::geom::{Point, PolyTree, Polygon, PolygonSet, Ring, TaggedRing};
 
 /// How offset edges are connected at convex corners.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -373,12 +373,48 @@ pub fn offset_tagged(
     corner_tag: u64,
 ) -> Result<PolyTree> {
     check_delta(delta)?;
+    // Already canonical polygons (e.g. the output of an earlier boolean) are a fixed point
+    // of normalization: offset them directly.
+    let mut polys: Vec<&Polygon> = Vec::new();
+    if delta != 0 && input.visit_polygons(&mut |p| polys.push(p)) && looks_canonical(&polys) {
+        let mut rings: Vec<TaggedRing> = Vec::new();
+        let mut zeros: Vec<u64> = Vec::new();
+        for p in polys {
+            for r in p.rings() {
+                zeros.clear();
+                zeros.resize(r.len(), 0);
+                raw_cycle(
+                    &r.0,
+                    &zeros,
+                    delta as f64,
+                    |_| VJoin::Join(join),
+                    tol,
+                    corner_tag,
+                    &mut rings,
+                )?;
+            }
+        }
+        return Boolean::new()
+            .subject(&rings, FillRule::Positive)
+            .execute_tree();
+    }
     let norm = Boolean::new()
         .subject(input, FillRule::NonZero)
         .execute_tree()?;
     if delta == 0 {
         return Ok(norm);
     }
+    offset_canonical_tree(&norm, delta, join, tol, corner_tag)
+}
+
+/// Offsets a canonical tree (the output of a boolean) without re-normalizing it.
+fn offset_canonical_tree(
+    norm: &PolyTree,
+    delta: i64,
+    join: Join,
+    tol: ArcTol,
+    corner_tag: u64,
+) -> Result<PolyTree> {
     let mut rings: Vec<TaggedRing> = Vec::new();
     for n in &norm.nodes {
         raw_cycle(
@@ -403,6 +439,10 @@ pub fn offset_tagged(
 /// overlap is accepted). Holes are handled naturally: they shrink when the region grows and
 /// grow when it shrinks. A negative offset larger than a feature's half-width removes it;
 /// necks narrower than `2 * |delta|` split the shape. `delta == 0` just normalizes.
+///
+/// Polygons already in canonical form (such as the output of a boolean or another offset)
+/// are recognized in linear time and not normalized again; such input is assumed to be
+/// valid (see [`validate`](crate::validate)).
 pub fn offset_tree(
     input: &(impl RingSource + ?Sized),
     delta: i64,
@@ -471,8 +511,9 @@ pub fn opening(input: &(impl RingSource + ?Sized), d: i64, tol: ArcTol) -> Resul
     let d = d
         .checked_abs()
         .ok_or(Error::InvalidParameter("offset delta too large"))?;
-    let shrunk = offset(input, -d, Join::Round, tol)?;
-    offset(&shrunk, d, Join::Round, tol)
+    // The intermediate tree is canonical: grow it directly.
+    let shrunk = offset_tagged(input, -d, Join::Round, tol, 0)?;
+    Ok(offset_canonical_tree(&shrunk, d, Join::Round, tol, 0)?.to_polygon_set())
 }
 
 /// Morphological closing: grow by `d`, then shrink by `d`, with round joins. Fills gaps and
@@ -481,8 +522,33 @@ pub fn closing(input: &(impl RingSource + ?Sized), d: i64, tol: ArcTol) -> Resul
     let d = d
         .checked_abs()
         .ok_or(Error::InvalidParameter("offset delta too large"))?;
-    let grown = offset(input, d, Join::Round, tol)?;
-    offset(&grown, -d, Join::Round, tol)
+    let grown = offset_tagged(input, d, Join::Round, tol, 0)?;
+    Ok(offset_canonical_tree(&grown, -d, Join::Round, tol, 0)?.to_polygon_set())
+}
+
+/// Cheap (linear) check that polygons are in the canonical form produced by booleans:
+/// rings with at least three vertices starting at their smallest one, no repeated or
+/// collinear vertices, outer rings counter-clockwise, holes clockwise, holes and polygons
+/// strictly sorted, coordinates in range. Normalizing such input returns it unchanged
+/// (validity is assumed, not checked: the offset of crossing input is still valid output).
+fn looks_canonical(polys: &[&Polygon]) -> bool {
+    let ring_ok = |r: &Ring, outer: bool| -> bool {
+        let p = &r.0;
+        let n = p.len();
+        if n < 3 || !p.iter().all(|q| q.in_range()) || p[1..].iter().any(|q| *q <= p[0]) {
+            return false;
+        }
+        if (0..n).any(|i| crate::predicates::orient(p[i], p[(i + 1) % n], p[(i + 2) % n]) == 0) {
+            return false;
+        }
+        (crate::query::ring_area2(p) > 0) == outer
+    };
+    polys.windows(2).all(|w| w[0].outer.0 < w[1].outer.0)
+        && polys.iter().all(|p| {
+            ring_ok(&p.outer, true)
+                && p.holes.iter().all(|h| ring_ok(h, false))
+                && p.holes.windows(2).all(|w| w[0].0 < w[1].0)
+        })
 }
 
 /// Offsets open paths with edge tags (see [`offset_tagged`] for the tagging rules; end caps
