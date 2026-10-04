@@ -15,7 +15,7 @@
 //! [`Positive`]: crate::FillRule::Positive
 
 use crate::arc::Shape;
-use crate::arc::{ArcTol, Circle, arc_points, round_pt};
+use crate::arc::{ArcStep, ArcTol, Circle, arc_points_with, round_pt};
 use crate::boolean::{Boolean, FillRule, PathSource, RingSource};
 use crate::error::{Error, Result};
 use crate::geom::{Point, PolyTree, Polygon, PolygonSet, Ring, TaggedRing};
@@ -118,19 +118,31 @@ enum VJoin {
     Cap(EndCap),
 }
 
+/// `v as f64` (correctly rounded), cheaper when `v` fits in an `i64`.
+#[inline]
+fn i128_to_f64(v: i128) -> f64 {
+    match i64::try_from(v) {
+        Ok(v) => v as f64,
+        Err(_) => v as f64,
+    }
+}
+
 /// Emits the points around vertex `cur` between incoming edge `prev -> cur` and outgoing
-/// edge `cur -> next`.
+/// edge `cur -> next`, whose unit directions are `d1 = V2::unit(prev, cur)` and
+/// `d2 = V2::unit(cur, next)`. `arc` caches the arc step of round joins (all of radius
+/// `|delta|`).
+#[allow(clippy::too_many_arguments)]
 fn emit_vertex(
     prev: Point,
     cur: Point,
     next: Point,
+    (d1, d2): (V2, V2),
     delta: f64,
     vj: VJoin,
     tol: ArcTol,
+    arc: &mut Option<ArcStep>,
     out: &mut Vec<Point>,
 ) -> Result<VKind> {
-    let d1 = V2::unit(prev, cur);
-    let d2 = V2::unit(cur, next);
     let n1 = d1.right();
     let n2 = d2.right();
     let u1 = n1.scale(delta);
@@ -229,7 +241,7 @@ fn emit_vertex(
             let end = at(cur, u2)?;
             push(out, start);
             let a0 = libm::atan2(u1.y, u1.x);
-            let mut sweep = libm::atan2(cr as f64, dt as f64);
+            let mut sweep = libm::atan2(i128_to_f64(cr), i128_to_f64(dt));
             if reversal {
                 sweep = if delta > 0.0 {
                     core::f64::consts::PI
@@ -241,7 +253,11 @@ fn emit_vertex(
             let sy = cur.y as f64 + u1.y;
             // A growing offset adds a disk around the vertex (convex arc); a shrinking one
             // removes it (concave arc).
-            arc_points(sx, sy, ad, a0, sweep, end, delta > 0.0, tol, out)?;
+            let st = match *arc {
+                Some(st) => st,
+                None => *arc.insert(ArcStep::new(ad, delta > 0.0, tol)?),
+            };
+            arc_points_with(sx, sy, ad, a0, sweep, end, st, tol, out)?;
         }
     }
     Ok(VKind::Join)
@@ -270,7 +286,8 @@ fn push_t(pts: &mut Vec<Point>, tags: &mut Vec<u64>, p: Point, t: u64) {
 /// Raw offset curve of a closed cycle `pts` (edge `i` from `pts[i]` to `pts[i + 1]` tagged
 /// `tags[i]`), with the join (or cap) at each vertex given by `vj`. Offset edges keep their
 /// source tag; join edges between equally tagged edges keep that tag (an approximated arc
-/// stays one arc), other joins get `corner_tag`.
+/// stays one arc), other joins get `corner_tag`. Returns whether some vertex was routed
+/// through the original vertex (which makes a loop, so the curve is not simple).
 #[allow(clippy::too_many_arguments)]
 fn raw_cycle(
     pts: &[Point],
@@ -280,20 +297,36 @@ fn raw_cycle(
     tol: ArcTol,
     corner_tag: u64,
     out: &mut Vec<TaggedRing>,
-) -> Result<()> {
+) -> Result<bool> {
     let n = pts.len();
     if n < 2 {
-        return Ok(());
+        return Ok(false);
     }
+    let mut through = false;
     let mut rp: Vec<Point> = Vec::with_capacity(n * 2);
     let mut rt: Vec<u64> = Vec::with_capacity(n * 2);
     let mut vbuf: Vec<Point> = Vec::new();
+    let mut arc = None;
+    let mut d_in = V2::unit(pts[n - 1], pts[0]);
     for i in 0..n {
         let prev = pts[(i + n - 1) % n];
         let next = pts[(i + 1) % n];
+        let d_out = V2::unit(pts[i], next);
         let (tin, tout) = (tags[(i + n - 1) % n], tags[i]);
         vbuf.clear();
-        let kind = emit_vertex(prev, pts[i], next, delta, vj(i), tol, &mut vbuf)?;
+        let kind = emit_vertex(
+            prev,
+            pts[i],
+            next,
+            (d_in, d_out),
+            delta,
+            vj(i),
+            tol,
+            &mut arc,
+            &mut vbuf,
+        )?;
+        d_in = d_out;
+        through |= kind == VKind::Through;
         let k = vbuf.len();
         for (j, &p) in vbuf.iter().enumerate() {
             let t = if j + 1 == k {
@@ -324,7 +357,7 @@ fn raw_cycle(
             tags: rt,
         });
     }
-    Ok(())
+    Ok(through)
 }
 
 /// Removes consecutive duplicates (and a closing duplicate when `closed`), keeping for each
@@ -377,29 +410,16 @@ pub fn offset_tagged(
     // of normalization: offset them directly.
     let mut polys: Vec<&Polygon> = Vec::new();
     if delta != 0 && input.visit_polygons(&mut |p| polys.push(p)) && looks_canonical(&polys) {
-        let mut rings: Vec<TaggedRing> = Vec::new();
-        let mut zeros: Vec<u64> = Vec::new();
-        for p in polys {
-            for r in p.rings() {
-                zeros.clear();
-                zeros.resize(r.len(), 0);
-                raw_cycle(
-                    &r.0,
-                    &zeros,
-                    delta as f64,
-                    |_| VJoin::Join(join),
-                    tol,
-                    corner_tag,
-                    &mut rings,
-                )?;
-            }
-        }
-        return Boolean::new()
-            .subject(&rings, FillRule::Positive)
-            .execute_tree();
+        let rings: Vec<&Ring> = polys.iter().flat_map(|p| p.rings()).collect();
+        let (raw, through) =
+            raw_cycles(&rings, |r| (&r.0[..], None), delta, join, tol, corner_tag)?;
+        return union_raw(&raw, !through);
     }
+    let mut count = 0usize;
+    input.visit_rings(&mut |_, _| count += 1);
     let norm = Boolean::new()
         .subject(input, FillRule::NonZero)
+        .force_clusters(count == 1 && !reference())
         .execute_tree()?;
     if delta == 0 {
         return Ok(norm);
@@ -415,21 +435,111 @@ fn offset_canonical_tree(
     tol: ArcTol,
     corner_tag: u64,
 ) -> Result<PolyTree> {
-    let mut rings: Vec<TaggedRing> = Vec::new();
-    for n in &norm.nodes {
+    let (raw, through) = raw_cycles(
+        &norm.nodes,
+        |n| (&n.ring.0[..], Some(&n.tags[..])),
+        delta,
+        join,
+        tol,
+        corner_tag,
+    )?;
+    union_raw(&raw, !through)
+}
+
+/// Raw offset curves of closed rings (`ring` gives the points and edge tags of each; no
+/// tags means all zero), in input order, and whether some vertex was routed through the
+/// original vertex. Computed in parallel with the `rayon` feature.
+fn raw_cycles<T: Sync>(
+    items: &[T],
+    ring: impl Fn(&T) -> (&[Point], Option<&[u64]>) + Sync + Send,
+    delta: i64,
+    join: Join,
+    tol: ArcTol,
+    corner_tag: u64,
+) -> Result<(Vec<TaggedRing>, bool)> {
+    let one = |it: &T, zeros: &mut Vec<u64>, out: &mut Vec<TaggedRing>| -> Result<bool> {
+        let (pts, tags) = ring(it);
+        let tags = match tags {
+            Some(t) => t,
+            None => {
+                zeros.clear();
+                zeros.resize(pts.len(), 0);
+                &zeros[..]
+            }
+        };
         raw_cycle(
-            &n.ring,
-            &n.tags,
+            pts,
+            tags,
             delta as f64,
             |_| VJoin::Join(join),
             tol,
             corner_tag,
-            &mut rings,
-        )?;
+            out,
+        )
+    };
+    let mut out: Vec<TaggedRing> = Vec::with_capacity(items.len());
+    let mut zeros: Vec<u64> = Vec::new();
+    let mut through = false;
+    if reference() || cfg!(not(feature = "rayon")) || items.len() < 2 {
+        for it in items {
+            through |= one(it, &mut zeros, &mut out)?;
+        }
+        return Ok((out, through));
     }
+    // Chunks of rings holding a similar number of vertices each.
+    let total: usize = items.iter().map(|it| ring(it).0.len()).sum();
+    let per = total.div_ceil(256).max(1024);
+    let mut bounds: Vec<(usize, usize)> = Vec::new();
+    let (mut start, mut acc) = (0, 0);
+    for (i, it) in items.iter().enumerate() {
+        acc += ring(it).0.len();
+        if acc >= per || i + 1 == items.len() {
+            bounds.push((start, i + 1));
+            (start, acc) = (i + 1, 0);
+        }
+    }
+    let parts = crate::par::map_items(&bounds, |&(a, b)| -> Result<(Vec<TaggedRing>, bool)> {
+        let mut out = Vec::with_capacity(b - a);
+        let mut zeros = Vec::new();
+        let mut through = false;
+        for it in &items[a..b] {
+            through |= one(it, &mut zeros, &mut out)?;
+        }
+        Ok((out, through))
+    });
+    for p in parts {
+        let (p, t) = p?;
+        out.extend(p);
+        through |= t;
+    }
+    Ok((out, through))
+}
+
+/// The union of raw offset curves under the positive fill rule. With `maybe_simple` (no
+/// loops through original vertices), a single curve that is a simple ring (a convex polygon
+/// grown, say) is recognized by the clustered pipeline and passed through without noding;
+/// the result is the same either way.
+fn union_raw(rings: &[TaggedRing], maybe_simple: bool) -> Result<PolyTree> {
     Boolean::new()
-        .subject(&rings, FillRule::Positive)
+        .subject(rings, FillRule::Positive)
+        .force_clusters(maybe_simple && rings.len() == 1 && !reference())
         .execute_tree()
+}
+
+std::thread_local! {
+    static REFERENCE: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+}
+
+fn reference() -> bool {
+    REFERENCE.with(|r| r.get())
+}
+
+/// Makes every offset started on the current thread use the plain reference pipeline
+/// (sequential raw curves, one-piece unions where the fast paths would recognize simple
+/// curves). The output is the same either way; for tests and benchmarks.
+#[doc(hidden)]
+pub fn set_offset_reference(yes: bool) {
+    REFERENCE.with(|r| r.set(yes));
 }
 
 /// Offsets a region by `delta` (positive grows, negative shrinks), returning the full
@@ -567,6 +677,7 @@ pub fn offset_paths_tagged(
     check_delta(delta)?;
     let mut rings: Vec<TaggedRing> = Vec::new();
     let mut err: Option<Error> = None;
+    let mut through = false;
     paths.visit_paths(&mut |pts, tags| {
         if err.is_some() {
             return;
@@ -579,7 +690,7 @@ pub fn offset_paths_tagged(
             return;
         }
         let tags = tags.unwrap_or(&[]);
-        if let Err(e) = raw_path(
+        match raw_path(
             pts,
             tags,
             delta as f64,
@@ -589,15 +700,14 @@ pub fn offset_paths_tagged(
             corner_tag,
             &mut rings,
         ) {
-            err = Some(e);
+            Ok(t) => through |= t,
+            Err(e) => err = Some(e),
         }
     });
     if let Some(e) = err {
         return Err(e);
     }
-    Boolean::new()
-        .subject(&rings, FillRule::Positive)
-        .execute_tree()
+    union_raw(&rings, !through)
 }
 
 /// Offsets open paths by `delta >= 0` on both sides (strokes them with width `2 * delta`),
@@ -643,12 +753,12 @@ fn raw_path(
     tol: ArcTol,
     corner_tag: u64,
     rings: &mut Vec<TaggedRing>,
-) -> Result<()> {
+) -> Result<bool> {
     let closed = cap == EndCap::Joined;
     // For a closed path the closing edge carries the last tag.
     let (v, t) = dedup_tagged(pts, tags, closed);
     match v.len() {
-        0 => return Ok(()),
+        0 => return Ok(false),
         1 => {
             let p = v[0];
             let d = delta as i64;
@@ -665,19 +775,19 @@ fn raw_path(
                         (p.x - d, p.y + d),
                     ])
                 }
-                EndCap::Butt => return Ok(()),
+                EndCap::Butt => return Ok(false),
             };
             rings.push(TaggedRing::uniform(ring, corner_tag));
-            return Ok(());
+            return Ok(false);
         }
         _ => {}
     }
     if closed && v.len() >= 3 {
         // Both sides of the loop: the ring and its reverse, each offset outward.
-        raw_cycle(&v, &t, delta, |_| VJoin::Join(join), tol, corner_tag, rings)?;
+        let t1 = raw_cycle(&v, &t, delta, |_| VJoin::Join(join), tol, corner_tag, rings)?;
         let mut rev = TaggedRing { points: v, tags: t };
         crate::arc::reverse_tagged(&mut rev);
-        raw_cycle(
+        let t2 = raw_cycle(
             &rev.points,
             &rev.tags,
             delta,
@@ -686,7 +796,7 @@ fn raw_path(
             corner_tag,
             rings,
         )?;
-        return Ok(());
+        return Ok(t1 || t2);
     }
     // Walk forward then back: p0 .. pn .. p1, with caps at the two turnarounds.
     let n = v.len();

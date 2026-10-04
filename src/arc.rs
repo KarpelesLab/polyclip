@@ -447,12 +447,47 @@ pub(crate) fn arc_points(
     tol: ArcTol,
     out: &mut Vec<Point>,
 ) -> Result<()> {
-    let kind = construction(tol.side, convex);
-    if tol.tolerance < 1 {
-        return Err(Error::InvalidParameter("arc tolerance must be >= 1"));
+    let st = ArcStep::new(r, convex, tol)?;
+    arc_points_with(sx, sy, r, a0, sweep, end, st, tol, out)
+}
+
+/// The construction and angular step [`arc_points`] uses for a radius, convexity and
+/// tolerance; computed once for many arcs of the same radius.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ArcStep {
+    kind: Construction,
+    step: f64,
+}
+
+impl ArcStep {
+    pub(crate) fn new(r: f64, convex: bool, tol: ArcTol) -> Result<Self> {
+        let kind = construction(tol.side, convex);
+        if tol.tolerance < 1 {
+            return Err(Error::InvalidParameter("arc tolerance must be >= 1"));
+        }
+        Ok(ArcStep {
+            kind,
+            step: step_for(r, tol.tolerance, kind),
+        })
     }
+}
+
+/// [`arc_points`] with the step computed beforehand by [`ArcStep::new`] (for the same `r`,
+/// `convex` and `tol`).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn arc_points_with(
+    sx: f64,
+    sy: f64,
+    r: f64,
+    a0: f64,
+    sweep: f64,
+    end: Point,
+    st: ArcStep,
+    tol: ArcTol,
+    out: &mut Vec<Point>,
+) -> Result<()> {
+    let ArcStep { kind, step } = st;
     let t = tol.tolerance as f64;
-    let step = step_for(r, tol.tolerance, kind);
     let mut n = segment_count(sweep, step)?;
     if kind == Construction::Mid {
         // The end points stay on the circle: make sure the end chords (and a single chord)

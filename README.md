@@ -80,7 +80,7 @@ Single thread unless noted, Apple Silicon laptop, release build (`cargo bench`,
 |---|---|---|---|
 | zone 100 mm × 100 mm − 5 000 inflated obstacles | ~25 ms | ~8 ms | ~41 ms |
 | union of 50 000 heavily overlapping 64-vertex circles | ~3.2 s | ~2.3 s | ~157 s |
-| offset of a 10 000-vertex polygon (round joins), convex | ~8.9 ms | | ~0.9 ms |
+| offset of a 10 000-vertex polygon (round joins), convex | ~1.2 ms | | ~0.9 ms |
 | offset of a 10 000-vertex wavy star | ~21 ms | | |
 | `distance_less_than`, 64-vertex polygons (average incl. bbox rejection) | ~80 ns | | |
 | fracture of the zone result (3 672 holes) | ~10 ms | | |
@@ -88,7 +88,7 @@ Single thread unless noted, Apple Silicon laptop, release build (`cargo bench`,
 | union of 50 000 stacked slots / diagonal slots (long dense parallel edges) | ~24 / ~95 ms | | |
 | cadlab GND pour (1 polygon, 2 153 holes, 242 k vertices, `testdata/`): `opening` by 100 µm | ~530 ms | ~93 ms | |
 | … the opened pour ∪ 40 small rectangles (thermal spokes) | ~9 ms | ~5 ms | |
-| … `offset` by −100 µm | ~76 ms | ~29 ms | |
+| … `offset` by −100 µm | ~76 ms | ~20 ms | |
 
 The noder adapts its spatial index to the data (uniform grid or k-d tree, sweeps along
 the direction in which the segments are thinnest, including the dominant segment
@@ -98,7 +98,9 @@ behaviour. Booleans split their input into clusters of rings that cannot interac
 boxes within a unit of each other) and compute each on its own, in parallel with `rayon`;
 a lone simple ring is only located and passed through, so a small operand meeting a few
 rings of a large one costs little more than reading it. The output is identical to
-computing everything at once.
+computing everything at once. Offsets build their raw curves in parallel with `rayon`, and a
+single raw curve that is already simple (a convex polygon grown, say) is passed through
+without noding.
 
 ## Limitations
 
