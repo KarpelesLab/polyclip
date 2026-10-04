@@ -19,26 +19,43 @@ pub(crate) fn cmp_sweep_edges(a: (Point, Point), b: (Point, Point)) -> Ordering 
 }
 
 /// Sweep status: the active edges bottom to top, split into blocks of bounded size so that
-/// insertions and removals stay cheap however wide the status grows. `last[b]` mirrors the
-/// last edge of block `b` in a dense array for the top-level binary search.
+/// insertions and removals stay cheap however wide the status grows. Every entry carries a
+/// copy of its edge, so the binary searches read contiguous memory; `last[b]` mirrors the
+/// last entry of block `b` in a dense array for the top-level search.
 struct Status {
-    blocks: Vec<Vec<u32>>,
-    last: Vec<u32>,
+    blocks: Vec<Vec<Entry>>,
+    last: Vec<Entry>,
 }
 
-const BLOCK: usize = 256;
+/// A status entry: an edge `(lo, hi)` and its index.
+#[derive(Clone, Copy)]
+struct Entry {
+    lo: Point,
+    hi: Point,
+    id: u32,
+}
+
+impl Entry {
+    #[inline]
+    fn new(edges: &[(Point, Point)], id: u32) -> Self {
+        let (lo, hi) = edges[id as usize];
+        Entry { lo, hi, id }
+    }
+}
+
+const BLOCK: usize = 128;
 
 impl Status {
-    /// A status holding `edges` (bottom to top).
-    fn from_sorted(edges: &[u32]) -> Self {
+    /// A status holding `ids` (bottom to top).
+    fn from_sorted(edges: &[(Point, Point)], ids: &[u32]) -> Self {
         let mut st = Status {
             blocks: Vec::new(),
             last: Vec::new(),
         };
-        for c in edges.chunks(BLOCK) {
+        for c in ids.chunks(BLOCK) {
             let mut b = Vec::with_capacity(2 * BLOCK);
-            b.extend_from_slice(c);
-            st.last.push(*c.last().unwrap_or(&0));
+            b.extend(c.iter().map(|&e| Entry::new(edges, e)));
+            st.last.push(b[b.len() - 1]);
             st.blocks.push(b);
         }
         st
@@ -46,29 +63,29 @@ impl Status {
 
     /// All edges, bottom to top.
     fn into_vec(self) -> Vec<u32> {
-        self.blocks.concat()
+        self.blocks.iter().flatten().map(|e| e.id).collect()
     }
 
-    /// Position `(block, index)` of the first edge for which `below` is false.
+    /// Position `(block, index)` of the first edge for which `below(lo, hi)` is false.
     #[inline]
-    fn find(&self, below: impl Fn(u32) -> bool) -> (usize, usize) {
-        let b = self.last.partition_point(|&e| below(e));
+    fn find(&self, below: impl Fn(Point, Point) -> bool) -> (usize, usize) {
+        let b = self.last.partition_point(|e| below(e.lo, e.hi));
         if b == self.blocks.len() {
             return match self.blocks.last() {
                 Some(l) => (b - 1, l.len()),
                 None => (0, 0),
             };
         }
-        (b, self.blocks[b].partition_point(|&e| below(e)))
+        (b, self.blocks[b].partition_point(|e| below(e.lo, e.hi)))
     }
 
     /// The edge just before position `(b, i)`.
     #[inline]
     fn before(&self, b: usize, i: usize) -> Option<u32> {
         if i > 0 {
-            Some(self.blocks[b][i - 1])
+            Some(self.blocks[b][i - 1].id)
         } else if b > 0 {
-            Some(self.last[b - 1])
+            Some(self.last[b - 1].id)
         } else {
             None
         }
@@ -79,7 +96,7 @@ impl Status {
         while b < self.blocks.len() {
             let len = self.blocks[b].len();
             if i + skip < len {
-                return Some(self.blocks[b][i + skip]);
+                return Some(self.blocks[b][i + skip].id);
             }
             skip -= len.saturating_sub(i).min(skip);
             b += 1;
@@ -94,27 +111,33 @@ impl Status {
         while count > 0 && b < self.blocks.len() {
             let blk = &self.blocks[b];
             let k = count.min(blk.len() - i.min(blk.len()));
-            out.extend_from_slice(&blk[i..i + k]);
+            out.extend(blk[i..i + k].iter().map(|e| e.id));
             count -= k;
             b += 1;
             i = 0;
         }
     }
 
-    /// Removes `remove` edges at `(b, i)` and inserts `insert` there.
+    /// Removes `remove` edges at `(b, i)` and inserts the edges `insert` there.
     fn splice(
         &mut self,
+        edges: &[(Point, Point)],
         b: usize,
         i: usize,
         mut remove: usize,
-        mut insert: impl ExactSizeIterator<Item = u32>,
+        insert: impl ExactSizeIterator<Item = u32>,
     ) {
+        let mut insert = insert.map(|e| Entry::new(edges, e));
         if self.blocks.is_empty() {
             if insert.len() == 0 {
                 return;
             }
             self.blocks.push(Vec::with_capacity(2 * BLOCK));
-            self.last.push(0);
+            self.last.push(Entry {
+                lo: Point::default(),
+                hi: Point::default(),
+                id: 0,
+            });
         }
         // Replace in place as far as possible (an edge continuing a chain replaces the
         // ending one without moving the others).
@@ -142,21 +165,25 @@ impl Status {
         blk.splice(i..i, insert);
         if blk.len() > 2 * BLOCK {
             let tail = blk.split_off(BLOCK);
+            let l = tail[tail.len() - 1];
             self.blocks.insert(b + 1, tail);
-            self.last.insert(b + 1, 0);
+            self.last.insert(b + 1, l);
         }
         // Refresh `last` for touched blocks and drop empty ones.
         let end = bb.max(b + 2).min(self.blocks.len());
         let mut k = b;
         let mut end = end;
         while k < end {
-            if self.blocks[k].is_empty() {
-                self.blocks.remove(k);
-                self.last.remove(k);
-                end -= 1;
-            } else {
-                self.last[k] = *self.blocks[k].last().unwrap();
-                k += 1;
+            match self.blocks[k].last() {
+                None => {
+                    self.blocks.remove(k);
+                    self.last.remove(k);
+                    end -= 1;
+                }
+                Some(&l) => {
+                    self.last[k] = l;
+                    k += 1;
+                }
             }
         }
     }
@@ -207,7 +234,7 @@ pub(crate) fn sweep_band(
     initial: &[u32],
     mut on_event: impl FnMut(Option<u32>, Option<u32>, &[u32], Range<u32>),
 ) -> Vec<u32> {
-    let mut status = Status::from_sorted(initial);
+    let mut status = Status::from_sorted(edges, initial);
     let mut ending_buf: Vec<u32> = Vec::new();
     let n = starting.end;
     let mut si = starting.start;
@@ -228,13 +255,10 @@ pub(crate) fn sweep_band(
         while si < n && edges[si].0 == v {
             si += 1;
         }
-        let (b, i) = status.find(|e| {
-            let (lo, h) = edges[e as usize];
-            h != v && orient(lo, h, v) > 0
-        });
+        let (b, i) = status.find(|lo, h| h != v && orient(lo, h, v) > 0);
         let below = status.before(b, i);
         status.collect(b, i, ending, &mut ending_buf);
-        status.splice(b, i, ending, (s0..si).map(|e| e as u32));
+        status.splice(edges, b, i, ending, (s0..si).map(|e| e as u32));
         let above = status.after(b, i, si - s0);
         on_event(below, above, &ending_buf, s0 as u32..si as u32);
     }
