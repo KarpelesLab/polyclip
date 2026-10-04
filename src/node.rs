@@ -546,7 +546,7 @@ pub(crate) fn snap_round_with(segs: &[(Point, Point)], engine: Engine) -> Vec<Fr
 
 /// [`snap_round_with`], with the fragments in consecutive chunks.
 pub(crate) fn snap_round_chunks(segs: &[(Point, Point)], engine: Engine) -> Vec<Vec<Frag>> {
-    let bboxes: Vec<Rect> = segs.iter().map(seg_bbox).collect();
+    let bboxes: Vec<Rect> = crate::par::map_slice(segs, seg_bbox);
     let grid = Grid::build(segs, &bboxes);
     let pp = pair_pass(segs, &bboxes, &grid);
     let hot = pp.crossing.iter().filter(|&&c| c).count();
@@ -1346,9 +1346,12 @@ fn fixpoint<'a>(
             }
             step(frontier)
         };
-    let mut frontier: Vec<u32> = (0..crossing.len() as u32)
-        .filter(|&k| crossing[k as usize])
-        .collect();
+    let parts = crate::par::map_ranges(crossing.len(), |r| {
+        r.filter(|&k| crossing[k])
+            .map(|k| k as u32)
+            .collect::<Vec<u32>>()
+    });
+    let mut frontier = crate::par::concat_vecs(parts);
     while !frontier.is_empty() {
         let segs = expand(&frontier, &pix_segs, &affected);
         frontier = expand(&segs, &seg_pix, &active);

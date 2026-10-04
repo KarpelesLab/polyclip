@@ -116,6 +116,19 @@ pub(crate) fn map_vec<T: Send, U: Send>(items: Vec<T>, f: impl Fn(T) -> U + Sync
     }
 }
 
+/// Maps a slice (in parallel with the `rayon` feature when it is large), in order.
+pub(crate) fn map_slice<T: Sync, U: Send>(
+    items: &[T],
+    f: impl Fn(&T) -> U + Sync + Send,
+) -> Vec<U> {
+    #[cfg(feature = "rayon")]
+    if items.len() >= 1 << 16 {
+        use rayon::prelude::*;
+        return items.par_iter().with_min_len(1 << 12).map(f).collect();
+    }
+    items.iter().map(f).collect()
+}
+
 /// Applies `f` to every item (in parallel with the `rayon` feature), returning the results
 /// in item order.
 #[cfg(feature = "rayon")]

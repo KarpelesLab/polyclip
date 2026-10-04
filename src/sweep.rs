@@ -107,7 +107,7 @@ impl Status {
         b: usize,
         i: usize,
         mut remove: usize,
-        insert: impl ExactSizeIterator<Item = u32>,
+        mut insert: impl ExactSizeIterator<Item = u32>,
     ) {
         if self.blocks.is_empty() {
             if insert.len() == 0 {
@@ -115,6 +115,16 @@ impl Status {
             }
             self.blocks.push(Vec::with_capacity(2 * BLOCK));
             self.last.push(0);
+        }
+        // Replace in place as far as possible (an edge continuing a chain replaces the
+        // ending one without moving the others).
+        let mut i = i;
+        let blk = &mut self.blocks[b];
+        while remove > 0 && i < blk.len() {
+            let Some(e) = insert.next() else { break };
+            blk[i] = e;
+            i += 1;
+            remove -= 1;
         }
         // Remove (possibly spilling into following blocks).
         let mut bb = b;

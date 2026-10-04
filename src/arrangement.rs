@@ -292,11 +292,11 @@ pub(crate) fn boundary(
     if engine == Engine::Reference || input.iter().any(|e| e.operand >= 2) {
         return boundary_reference(input, inside);
     }
-    let segs: Vec<(Point, Point)> = input.iter().map(|e| (e.a, e.b)).collect();
+    let segs: Vec<(Point, Point)> = crate::par::map_slice(input, |e| (e.a, e.b));
     let frags = snap_round_chunks(&segs, engine);
     drop(segs);
     let lean = merge_lean(input, frags, engine);
-    let mut his: Vec<Point> = lean.segs.iter().map(|e| e.1).collect();
+    let mut his: Vec<Point> = crate::par::map_slice(&lean.segs, |e| e.1);
     crate::par::sort_unstable(&mut his);
     let cuts = band_cuts(&lean.segs, &his, engine);
     if cuts.len() <= 2 {
