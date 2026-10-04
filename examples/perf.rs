@@ -96,7 +96,289 @@ fn cadlab() {
     );
 }
 
+/// Tracks: 45/90 degree polylines of a few segments, deterministic.
+fn corpus_tracks(b: Rect, n: usize, seed: u64) -> Vec<Path> {
+    let mut s = seed;
+    let (w, h) = (b.width() as u64, b.height() as u64);
+    (0..n)
+        .map(|_| {
+            let mut p = Point::new(
+                b.min.x + (lcg(&mut s) % w) as i64,
+                b.min.y + (lcg(&mut s) % h) as i64,
+            );
+            let mut pts = vec![p];
+            for _ in 0..1 + lcg(&mut s) % 4 {
+                let len = 500_000 + (lcg(&mut s) % 5_000_000) as i64;
+                let (dx, dy) = [
+                    (1, 0),
+                    (1, 1),
+                    (0, 1),
+                    (-1, 1),
+                    (-1, 0),
+                    (-1, -1),
+                    (0, -1),
+                    (1, -1),
+                ][(lcg(&mut s) % 8) as usize];
+                p = Point::new(p.x + dx * len, p.y + dy * len);
+                pts.push(p);
+            }
+            Path(pts)
+        })
+        .collect()
+}
+
+/// Pads: small axis-aligned rectangles, deterministic.
+fn corpus_pads(b: Rect, n: usize, seed: u64) -> Vec<Ring> {
+    let mut s = seed;
+    let (w, h) = (b.width() as u64, b.height() as u64);
+    (0..n)
+        .map(|_| {
+            let (x, y) = (
+                b.min.x + (lcg(&mut s) % w) as i64,
+                b.min.y + (lcg(&mut s) % h) as i64,
+            );
+            let (pw, ph) = (
+                200_000 + (lcg(&mut s) % 1_500_000) as i64,
+                200_000 + (lcg(&mut s) % 1_500_000) as i64,
+            );
+            Ring::from([(x, y), (x + pw, y), (x + pw, y + ph), (x, y + ph)])
+        })
+        .collect()
+}
+
+/// Operations other than booleans and offsets on the real corpus (DRC queries, path
+/// clipping, fracture, triangulation, simplification, validation).
+fn cadlab_ops() {
+    let fill = corpus::load("cadlab_gnd_in1.pclp");
+    let only: Vec<String> = std::env::args()
+        .skip_while(|a| a != "cadlab-ops")
+        .skip(1)
+        .collect();
+    let want = |k: &str| only.is_empty() || only.iter().any(|o| o == k);
+    let us = |d: std::time::Duration| d.as_secs_f64() * 1e6;
+    let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
+    let b = fill.bbox().unwrap();
+    println!(
+        "corpus: {} polygons ({} outer vertices), {} rings, {} vertices",
+        fill.len(),
+        fill[0].outer.len(),
+        fill.iter().map(|p| 1 + p.holes.len()).sum::<usize>(),
+        fill.iter().map(|p| p.vertex_count()).sum::<usize>()
+    );
+    let tracks = corpus_tracks(b, 500, 11);
+    let pads = corpus_pads(b, 2000, 12);
+    if want("clip1") {
+        for _ in 0..300 {
+            std::hint::black_box(clip_paths(&tracks[..1], &fill, FillRule::NonZero).unwrap());
+        }
+    }
+    if want("clip") {
+        let (d, r) = best(|| clip_paths(&tracks, &fill, FillRule::NonZero).unwrap());
+        println!(
+            "clip_paths 500 tracks: {:8.2} ms ({} in, {} out)",
+            ms(d),
+            r.inside.len(),
+            r.outside.len()
+        );
+        set_always_monolithic(true);
+        let (dm, rm) = best(|| clip_paths(&tracks, &fill, FillRule::NonZero).unwrap());
+        set_always_monolithic(false);
+        println!(
+            "  in one piece:         {:8.2} ms (equal: {})",
+            ms(dm),
+            r == rm
+        );
+        let (d, _) = best(|| clip_paths(&tracks[..1], &fill, FillRule::NonZero).unwrap());
+        println!("clip_paths 1 track:    {:8.2} ms", ms(d));
+        let (d, _) = best(|| {
+            tracks[..100]
+                .iter()
+                .map(|t| {
+                    clip_paths(t, &fill, FillRule::NonZero)
+                        .unwrap()
+                        .inside
+                        .len()
+                })
+                .sum::<usize>()
+        });
+        println!("clip_paths 100 x 1 track: {:8.2} ms/track", ms(d) / 100.0);
+    }
+    if want("drc") {
+        let (d, n) = best(|| pads.iter().filter(|p| intersects(&fill, *p)).count());
+        println!(
+            "intersects:          {:8.2} us/pad ({n} hits)",
+            us(d) / 2000.0
+        );
+        let (d, n) = best(|| {
+            pads.iter()
+                .filter(|p| distance_less_than(&fill, *p, 200_000))
+                .count()
+        });
+        println!(
+            "distance_less_than:  {:8.2} us/pad ({n} hits)",
+            us(d) / 2000.0
+        );
+        let (d, n) = best(|| pads[..200].iter().filter(|p| contains(&fill, *p)).count());
+        println!(
+            "contains:            {:8.2} us/pad ({n} hits)",
+            us(d) / 200.0
+        );
+        let (d, _) = best(|| {
+            pads[..50]
+                .iter()
+                .map(|p| distance(&fill, p).unwrap().sq.to_f64())
+                .sum::<f64>()
+        });
+        println!("distance:            {:8.2} us/pad", us(d) / 50.0);
+        let (d, n) = best(|| {
+            pads.iter()
+                .filter(|p| locate(&fill, p[0]) == Location::Inside)
+                .count()
+        });
+        println!(
+            "locate:              {:8.2} us/pt ({n} inside)",
+            us(d) / 2000.0
+        );
+        let (d, _) = best(|| area2(&fill));
+        println!("area2:               {:8.2} ms", ms(d));
+    }
+    if want("prepared") || want("drc") {
+        let t = Instant::now();
+        let pz = Prepared::new(&fill);
+        println!("Prepared::new:       {:8.2} ms", ms(t.elapsed()));
+        // Pads centred in the holes (clearance checks) and the random ones.
+        let hole_pads: Vec<Ring> = fill[0]
+            .holes
+            .iter()
+            .take(2000)
+            .map(|h| {
+                let c = h.bbox().unwrap();
+                let (x, y) = ((c.min.x + c.max.x) / 2, (c.min.y + c.max.y) / 2);
+                Ring::from([
+                    (x - 100_000, y - 100_000),
+                    (x + 100_000, y - 100_000),
+                    (x + 100_000, y + 100_000),
+                    (x - 100_000, y + 100_000),
+                ])
+            })
+            .collect();
+        for (name, set) in [("random pads", &pads), ("pads in holes", &hole_pads)] {
+            let n = set.len() as f64;
+            println!("{name}:");
+            let (d, a) = best(|| set.iter().filter(|p| pz.intersects(*p)).count());
+            let (d0, b) = best(|| set[..100].iter().filter(|p| intersects(&fill, *p)).count());
+            println!(
+                "  intersects:         {:8.2} us/pad (free fn {:8.2} us) {a} {b}",
+                us(d) / n,
+                us(d0) / 100.0
+            );
+            let (d, a) = best(|| {
+                set.iter()
+                    .filter(|p| pz.distance_less_than(*p, 200_000))
+                    .count()
+            });
+            let (d0, b) = best(|| {
+                set[..100]
+                    .iter()
+                    .filter(|p| distance_less_than(&fill, *p, 200_000))
+                    .count()
+            });
+            println!(
+                "  distance_less_than: {:8.2} us/pad (free fn {:8.2} us) {a} {b}",
+                us(d) / n,
+                us(d0) / 100.0
+            );
+            let (d, a) = best(|| set.iter().filter(|p| pz.contains(*p)).count());
+            let (d0, b) = best(|| set[..20].iter().filter(|p| contains(&fill, *p)).count());
+            println!(
+                "  contains:           {:8.2} us/pad (free fn {:8.2} us) {a} {b}",
+                us(d) / n,
+                us(d0) / 20.0
+            );
+            let (d, _) = best(|| {
+                set.iter()
+                    .map(|p| pz.distance(p).unwrap().sq.to_f64())
+                    .sum::<f64>()
+            });
+            let (d0, _) = best(|| {
+                set[..20]
+                    .iter()
+                    .map(|p| distance(&fill, p).unwrap().sq.to_f64())
+                    .sum::<f64>()
+            });
+            println!(
+                "  distance:           {:8.2} us/pad (free fn {:8.2} us)",
+                us(d) / n,
+                us(d0) / 20.0
+            );
+            let (d, a) = best(|| {
+                set.iter()
+                    .filter(|p| pz.locate(p[0]) == Location::Inside)
+                    .count()
+            });
+            println!("  locate:             {:8.2} us/pt {a}", us(d) / n);
+        }
+    }
+    if want("fracture") {
+        let (d, r) = best(|| fracture_set(&fill).unwrap());
+        println!(
+            "fracture:            {:8.2} ms ({} verts)",
+            ms(d),
+            r.iter().map(|r| r.len()).sum::<usize>()
+        );
+    }
+    if want("triangulate") {
+        let (d, t) = best(|| triangulate_set(&fill).unwrap());
+        println!(
+            "triangulate:         {:8.2} ms ({} triangles)",
+            ms(d),
+            t.triangles.len()
+        );
+        let (d, _) = best(|| triangulate_delaunay(&fill[0]).unwrap());
+        println!("triangulate_delaunay:{:8.2} ms", ms(d));
+    }
+    if want("simplify") {
+        let (d, r) = best(|| simplify_polygons(&fill, 5_000));
+        println!(
+            "simplify(5 um):      {:8.2} ms ({} verts)",
+            ms(d),
+            r.iter().map(|p| p.vertex_count()).sum::<usize>()
+        );
+    }
+    if want("validate") {
+        let (d, _) = best(|| validate_set(&fill).unwrap());
+        println!("validate_set:        {:8.2} ms", ms(d));
+        let (d, _) = best(|| check_canonical(&fill, true).unwrap());
+        println!("check_canonical:     {:8.2} ms", ms(d));
+    }
+    if want("zonefill") {
+        // The pour as the zone, pads as obstacles.
+        let t = Instant::now();
+        let mut z = ZoneFill::new(&fill, FillRule::NonZero).unwrap();
+        for (i, p) in pads[..500].iter().enumerate() {
+            z.insert(i as u64, p).unwrap();
+        }
+        z.commit();
+        std::hint::black_box(z.result());
+        println!("ZoneFill build:      {:8.2} ms", ms(t.elapsed()));
+        let mut s = 99u64;
+        let t = Instant::now();
+        for _ in 0..100 {
+            let id = lcg(&mut s) % 500;
+            let p = &pads[500 + (lcg(&mut s) % 1500) as usize];
+            z.update(id, p).unwrap();
+            z.commit();
+            std::hint::black_box(z.result());
+        }
+        println!("ZoneFill move+result:{:8.2} us", us(t.elapsed()) / 100.0);
+    }
+}
+
 fn main() {
+    if std::env::args().any(|a| a == "cadlab-ops") {
+        cadlab_ops();
+        return;
+    }
     if std::env::args().any(|a| a == "cadlab") {
         cadlab();
         return;

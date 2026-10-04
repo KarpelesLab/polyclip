@@ -31,7 +31,9 @@ output), usable as a standalone crate.
   (reconstruct arcs for Gerber/IPC-2581, explain DRC results).
 - **Queries**: exact area, centroid, bounding box, point location, `intersects`,
   `contains`, exact minimum distance with closest points, and a fast
-  `distance_less_than` for DRC.
+  `distance_less_than` for DRC; `Prepared` indexes a geometry queried many times (a zone
+  fill against every pad and track) and answers the same queries, with identical results,
+  in microseconds.
 - **Utilities**: validity check with reasons, fracture (holes joined by zero-width cut-ins
   for Gerber regions), topology-preserving simplification, convex hull, Minkowski sum.
 
@@ -89,6 +91,8 @@ Single thread unless noted, Apple Silicon laptop, release build (`cargo bench`,
 | cadlab GND pour (1 polygon, 2 153 holes, 242 k vertices, `testdata/`): `opening` by 100 µm | ~530 ms | ~93 ms | |
 | … the opened pour ∪ 40 small rectangles (thermal spokes) | ~9 ms | ~5 ms | |
 | … `offset` by −100 µm | ~76 ms | ~20 ms | |
+| … DRC per pad (`Prepared`, built once in ~25 ms): `intersects`, `distance_less_than` / `contains` / `distance` / `locate` | ~2 µs / ~3–6 µs / ~2–11 µs / ~1.3 µs | | |
+| … the same with the free functions (no index) | ~1 ms / ~24 ms / ~20 ms / ~0.7 ms | | |
 
 The noder adapts its spatial index to the data (uniform grid or k-d tree, sweeps along
 the direction in which the segments are thinnest, including the dominant segment

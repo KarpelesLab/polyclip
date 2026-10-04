@@ -13,7 +13,7 @@ pub(crate) struct Dir {
 
 impl Dir {
     pub const X: Dir = Dir { nx: 1, ny: 0 };
-    const FIXED: [Dir; 4] = [
+    pub(crate) const FIXED: [Dir; 4] = [
         Dir { nx: 1, ny: 0 },
         Dir { nx: 0, ny: 1 },
         Dir { nx: 1, ny: 1 },

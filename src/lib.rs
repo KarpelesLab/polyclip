@@ -113,7 +113,7 @@
 //! | Booleans | [`Boolean`], [`boolean`], [`union_all`], [`clip_paths`], [`ZoneFill`] (incremental) |
 //! | Offsetting | [`offset`], [`offset_tree`], [`offset_tagged`], [`offset_paths`], [`offset_shape`], [`opening`], [`closing`] |
 //! | Curves | [`Circle`], [`Shape`], [`Curve`], [`ArcTol`], [`Side`], [`arcs_from_tags`], [`curved_boolean`] |
-//! | Queries | [`locate`], [`intersects`], [`contains`], [`area2`], [`centroid`], [`distance`], [`distance_less_than`] |
+//! | Queries | [`locate`], [`intersects`], [`contains`], [`area2`], [`centroid`], [`distance`], [`distance_less_than`], [`Prepared`] (indexed, for repeated queries against one geometry) |
 //! | Validity | [`validate`], [`validate_set`], [`check_canonical`] |
 //! | Utilities | [`fracture`], [`simplify_polygons`], [`triangulate`], [`triangulate_delaunay`], [`convex_hull`], [`minkowski_sum`], [`trapezoids`] |
 //!
@@ -145,6 +145,7 @@ mod node;
 mod offset;
 mod par;
 pub mod predicates;
+mod prepared;
 mod query;
 mod simplify;
 mod sweep;
@@ -171,6 +172,7 @@ pub use offset::{
     EndCap, Join, closing, offset, offset_paths, offset_paths_tagged, offset_paths_tree,
     offset_shape, offset_shape_tagged, offset_tagged, offset_tree, opening, set_offset_reference,
 };
+pub use prepared::{Preparable, Prepared};
 pub use query::{
     Geometry, Location, Segment, area2, centroid, contains, in_range, intersects, locate,
     locate_in_polygon, locate_in_ring, ring_area2, ring_winding,

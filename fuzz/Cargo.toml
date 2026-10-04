@@ -108,3 +108,10 @@ path = "fuzz_targets/distance.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "prepared"
+path = "fuzz_targets/prepared.rs"
+test = false
+doc = false
+bench = false

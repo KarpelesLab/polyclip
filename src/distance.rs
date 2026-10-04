@@ -138,7 +138,7 @@ fn point_segment_lt(p: Point, a: Point, b: Point, d2: u128) -> bool {
 }
 
 /// A point common to two intersecting segments (for reporting).
-fn common_point(a: Point, b: Point, c: Point, d: Point) -> PointF {
+pub(crate) fn common_point(a: Point, b: Point, c: Point, d: Point) -> PointF {
     for (p, (s, t)) in [(c, (a, b)), (d, (a, b)), (a, (c, d)), (b, (c, d))] {
         if on_segment(s, t, p) {
             return p.into();
@@ -149,7 +149,7 @@ fn common_point(a: Point, b: Point, c: Point, d: Point) -> PointF {
 }
 
 /// Exact distance between two segments with closest points.
-fn segment_segment(a: Point, b: Point, c: Point, d: Point) -> (SqDist, PointF, PointF) {
+pub(crate) fn segment_segment(a: Point, b: Point, c: Point, d: Point) -> (SqDist, PointF, PointF) {
     if segments_intersect(a, b, c, d) {
         let p = common_point(a, b, c, d);
         return (SqDist::ZERO, p, p);
@@ -173,7 +173,7 @@ fn segment_segment(a: Point, b: Point, c: Point, d: Point) -> (SqDist, PointF, P
 
 /// `true` when two segments are closer than `d` (`d2 = d * d`).
 #[inline]
-fn segment_segment_lt(a: Point, b: Point, c: Point, d: Point, d2: u128) -> bool {
+pub(crate) fn segment_segment_lt(a: Point, b: Point, c: Point, d: Point, d2: u128) -> bool {
     segments_intersect(a, b, c, d)
         || point_segment_lt(a, c, d, d2)
         || point_segment_lt(b, c, d, d2)
@@ -182,7 +182,7 @@ fn segment_segment_lt(a: Point, b: Point, c: Point, d: Point, d2: u128) -> bool 
 }
 
 /// Squared gap between two rectangles (0 when they overlap).
-fn rect_gap2(a: &Rect, b: &Rect) -> u128 {
+pub(crate) fn rect_gap2(a: &Rect, b: &Rect) -> u128 {
     let dx = (b.min.x - a.max.x).max(a.min.x - b.max.x).max(0) as u128;
     let dy = (b.min.y - a.max.y).max(a.min.y - b.max.y).max(0) as u128;
     dx * dx + dy * dy
@@ -292,18 +292,18 @@ pub fn distance<A: Geometry + ?Sized, B: Geometry + ?Sized>(a: &A, b: &B) -> Opt
 
 /// A bounding-volume hierarchy over segments (reordered in place): interior nodes have
 /// `count == 0` and children at `first`, `first + 1`; leaves cover `first..first + count`.
-struct Bvh {
-    nodes: Vec<BvhNode>,
+pub(crate) struct Bvh {
+    pub nodes: Vec<BvhNode>,
 }
 
-struct BvhNode {
-    bbox: Rect,
-    first: u32,
-    count: u32,
+pub(crate) struct BvhNode {
+    pub bbox: Rect,
+    pub first: u32,
+    pub count: u32,
 }
 
 impl Bvh {
-    fn build(segs: &mut [(Point, Point, Rect)]) -> Bvh {
+    pub fn build(segs: &mut [(Point, Point, Rect)]) -> Bvh {
         let mut nodes = vec![BvhNode {
             bbox: bbox_of(segs),
             first: 0,

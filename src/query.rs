@@ -519,6 +519,19 @@ pub(crate) fn any_pair(
         return x_sweep(sa, sb, margin, f);
     }
     let dir = crate::dir::separating(sa.iter().map(|s| (s.0, s.1)), sb.iter().map(|s| (s.0, s.1)));
+    dir_sweep(sa, sb, dir, margin, f)
+}
+
+/// The sweep-and-prune of [`any_pair`] along `dir`: items are visited in order of projected
+/// start (ties: `sa` first, then by projected end and index), each against the items of the
+/// other list started before it and still reaching it, in that same order.
+pub(crate) fn dir_sweep(
+    sa: &[(Point, Point, Rect)],
+    sb: &[(Point, Point, Rect)],
+    dir: crate::dir::Dir,
+    margin: i64,
+    mut f: impl FnMut(&(Point, Point, Rect), &(Point, Point, Rect)) -> bool,
+) -> bool {
     // Segments within distance `margin` have projections at most `margin * |n|` apart.
     let m: i128 = if margin > 0 {
         libm::ceil(margin as f64 * libm::hypot(dir.nx as f64, dir.ny as f64)) as i128 + 1
@@ -661,7 +674,7 @@ pub(crate) fn any_component_inside<A: Geometry + ?Sized, B: Geometry + ?Sized>(
     outer.first_not_outside(&pts)
 }
 
-const EMPTY_RECT: Rect = Rect {
+pub(crate) const EMPTY_RECT: Rect = Rect {
     min: Point {
         x: i64::MAX,
         y: i64::MAX,
@@ -821,7 +834,7 @@ pub fn contains<A: Geometry + ?Sized, B: Geometry + ?Sized>(a: &A, b: &B) -> boo
 
 /// Location of the point `m2 / 2` (given in doubled coordinates) relative to the region
 /// bounded by `segs` (even-odd rule over all boundary segments), exactly.
-fn locate_doubled(segs: &[(Point, Point, Rect)], m2: Point) -> Location {
+pub(crate) fn locate_doubled(segs: &[(Point, Point, Rect)], m2: Point) -> Location {
     let mut inside = false;
     for &(a, b, _) in segs {
         let (a, b) = (Point::new(2 * a.x, 2 * a.y), Point::new(2 * b.x, 2 * b.y));
