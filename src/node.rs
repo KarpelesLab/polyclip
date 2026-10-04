@@ -176,14 +176,12 @@ impl Grid {
             let mut keys = crate::par::concat(&parts, |p| &p[..]);
             drop(parts);
             crate::par::sort_unstable(&mut keys);
-            let mut start = vec![0u32; nx * ny + 1];
-            for &k in &keys {
-                start[(k >> 32) as usize + 1] += 1;
-            }
-            for c in 0..nx * ny {
-                start[c + 1] += start[c];
-            }
-            (start, keys.iter().map(|&k| k as u32).collect())
+            let parts = crate::par::map_ranges(nx * ny + 1, |r| {
+                r.map(|c| keys.partition_point(|&k| k >> 32 < c as u64) as u32)
+                    .collect::<Vec<u32>>()
+            });
+            let start = crate::par::concat_vecs(parts);
+            (start, crate::par::map_slice(&keys, |&k| k as u32))
         } else {
             let mut pairs: Vec<(u32, u32)> = Vec::with_capacity(counts.iter().sum());
             for i in 0..n {
@@ -197,13 +195,14 @@ impl Grid {
         if start.windows(2).any(|w| w[1] - w[0] > 256) {
             return None;
         }
-        let mut leaves = Vec::with_capacity(nx * ny);
-        for cy in 0..ny as i64 {
-            for cx in 0..nx as i64 {
-                let lo = Point::new(x0 + cx * s, y0 + cy * s);
-                leaves.push((lo, Point::new(lo.x + s, lo.y + s)));
-            }
-        }
+        let parts = crate::par::map_ranges(nx * ny, |r| {
+            r.map(|c| {
+                let lo = Point::new(x0 + (c % nx) as i64 * s, y0 + (c / nx) as i64 * s);
+                (lo, Point::new(lo.x + s, lo.y + s))
+            })
+            .collect::<Vec<_>>()
+        });
+        let leaves = crate::par::concat_vecs(parts);
         Some(Grid {
             leaves,
             start,
