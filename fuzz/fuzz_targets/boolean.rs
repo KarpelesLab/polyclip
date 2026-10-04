@@ -3,8 +3,9 @@
 //!
 //! Checks: out-of-range input is rejected with `Err` (and in-range input never is); the
 //! output is canonical (`check_canonical`); `execute`, `execute_tree` and
-//! `execute_tagged` agree; re-normalizing the output with `union_all` stays canonical
-//! and keeps the area up to snap-rounding slack.
+//! `execute_tagged` agree; computing independent clusters of rings separately gives the
+//! same tree as computing everything at once; re-normalizing the output with `union_all`
+//! stays canonical and keeps the area up to snap-rounding slack.
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
@@ -44,6 +45,20 @@ fuzz_target!(|data: &[u8]| {
         assert_eq!(t.outer.points, p.outer.0);
         assert_eq!(t.outer.tags.len(), t.outer.points.len(), "one tag per edge");
     }
+    // Clusters of rings computed separately (forced even where not worthwhile) give exactly
+    // the one-piece result.
+    let piece = |force: bool| {
+        Boolean::new()
+            .subject(&a, ra)
+            .clip(&b, rb)
+            .op(op)
+            .keep_collinear(keep)
+            .monolithic(!force)
+            .force_clusters(force)
+            .execute_tree()
+            .expect("in range")
+    };
+    assert_eq!(piece(true), piece(false), "clustered result differs");
     // Same through the free function when both rules agree.
     if ra == rb && !keep {
         assert_eq!(boolean(op, &a, &b, ra).expect("boolean()"), out);
