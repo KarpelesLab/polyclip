@@ -211,9 +211,12 @@ impl<T: RingSource + ?Sized> RingSource for &T {
 #[derive(Clone, Debug, Default)]
 pub struct Boolean {
     edges: Vec<InEdge>,
+    /// Index of the first edge of every ring in `edges` (rings are contiguous).
+    ring_starts: Vec<u32>,
     fill: [FillRule; 2],
     op: Op,
     keep_collinear: bool,
+    clustering: Clustering,
     error: Option<Error>,
 }
 
@@ -226,6 +229,7 @@ impl Boolean {
     /// Removes all input, keeping allocations and settings.
     pub fn clear(&mut self) {
         self.edges.clear();
+        self.ring_starts.clear();
         self.error = None;
     }
 
@@ -250,6 +254,30 @@ impl Boolean {
     /// Keeps collinear vertices in the output (builder form). Off by default.
     pub fn keep_collinear(mut self, keep: bool) -> Self {
         self.keep_collinear = keep;
+        self
+    }
+
+    /// Always processes all rings together, never splitting them into independent clusters
+    /// (builder form). The output is the same either way; for tests and benchmarks.
+    #[doc(hidden)]
+    pub fn monolithic(mut self, yes: bool) -> Self {
+        self.clustering = if yes {
+            Clustering::Never
+        } else {
+            Clustering::Auto
+        };
+        self
+    }
+
+    /// Splits the rings into independent clusters whenever possible, even when that does not
+    /// look worthwhile (builder form). The output is the same either way; for tests.
+    #[doc(hidden)]
+    pub fn force_clusters(mut self, yes: bool) -> Self {
+        self.clustering = if yes {
+            Clustering::Always
+        } else {
+            Clustering::Auto
+        };
         self
     }
 
@@ -281,9 +309,11 @@ impl Boolean {
 
     fn add_rings(&mut self, rings: &(impl RingSource + ?Sized), operand: u8) {
         let edges = &mut self.edges;
+        let starts = &mut self.ring_starts;
         let error = &mut self.error;
         rings.visit_rings(&mut |pts, tags| {
             let n = pts.len();
+            starts.push(edges.len() as u32);
             if error.is_none()
                 && let Some(&p) = pts.iter().find(|p| !p.in_range())
             {
@@ -319,11 +349,44 @@ impl Boolean {
             return Err(Error::TooLarge);
         }
         let (fill, op) = (self.fill, self.op);
-        let boundary = compute(&self.edges, |w| {
-            op.apply(fill[0].is_inside(w[0]), fill[1].is_inside(w[1]))
-        });
+        let inside = move |w: [i32; 2]| op.apply(fill[0].is_inside(w[0]), fill[1].is_inside(w[1]));
+        if self.clustering != Clustering::Never
+            && !ALWAYS_MONOLITHIC.load(core::sync::atomic::Ordering::Relaxed)
+            && let Some(tree) = crate::cluster::execute(
+                &self.edges,
+                &self.ring_starts,
+                inside,
+                self.keep_collinear,
+                self.clustering == Clustering::Always,
+            )
+        {
+            return Ok(tree);
+        }
+        let boundary = compute(&self.edges, inside);
         Ok(assemble(boundary, self.keep_collinear))
     }
+}
+
+static ALWAYS_MONOLITHIC: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// Makes every boolean of the process (including those inside offsets and other operations)
+/// run in one piece, as with [`Boolean::monolithic`]. The output is the same either way;
+/// for tests and benchmarks.
+#[doc(hidden)]
+pub fn set_always_monolithic(yes: bool) {
+    ALWAYS_MONOLITHIC.store(yes, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether rings are split into independent clusters (see `cluster.rs`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Clustering {
+    /// When it looks worthwhile.
+    #[default]
+    Auto,
+    Never,
+    /// Whenever possible (tests).
+    Always,
 }
 
 /// Minimal union-find over region ids.
@@ -361,7 +424,7 @@ impl Regions {
 /// consecutive status edges, the connected components of the result and of its complement:
 /// gaps on both sides of a non-boundary edge belong to the same component, and gaps meeting
 /// at a vertex where edges only end merge. Region 0 is the unbounded exterior.
-fn compute(edges: &[InEdge], inside: impl Fn([i32; 2]) -> bool) -> Vec<DirEdge> {
+pub(crate) fn compute(edges: &[InEdge], inside: impl Fn([i32; 2]) -> bool) -> Vec<DirEdge> {
     let arr = Arrangement::build_unwound(edges);
     let n = arr.edges.len();
     let segs: Vec<(Point, Point)> = arr.edges.iter().map(|e| (e.lo, e.hi)).collect();

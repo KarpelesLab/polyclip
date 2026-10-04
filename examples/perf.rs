@@ -59,6 +59,14 @@ fn cadlab() {
         ms(d),
         opened == grown
     );
+    set_always_monolithic(true);
+    let (d, one) = best(|| opening(&fill, w, tol).unwrap());
+    set_always_monolithic(false);
+    println!(
+        "  in one piece:  {:7.1} ms (equal: {})",
+        ms(d),
+        opened == one
+    );
     let spokes: Vec<Ring> = (0..40)
         .map(|k| {
             let (x, y) = (10_000_000 + k * 3_000_000, 50_000_000);
@@ -70,14 +78,22 @@ fn cadlab() {
             ])
         })
         .collect();
-    let (d, _) = best(|| {
+    let spoked = |mono: bool| {
         Boolean::new()
             .subject(&opened, FillRule::NonZero)
             .subject(&spokes, FillRule::NonZero)
+            .monolithic(mono)
             .execute()
             .unwrap()
-    });
-    println!("union + 40 spokes: {:7.1} ms", ms(d));
+    };
+    let (d, u) = best(|| spoked(false));
+    let (dm, um) = best(|| spoked(true));
+    println!(
+        "union + 40 spokes: {:7.1} ms (in one piece: {:.1} ms, equal: {})",
+        ms(d),
+        ms(dm),
+        u == um
+    );
 }
 
 fn main() {

@@ -28,6 +28,26 @@ pub(crate) fn map_ranges<T: Send>(n: usize, f: impl Fn(Range<usize>) -> T + Sync
     vec![f(0..n)]
 }
 
+/// Applies `f` to every item (in parallel with the `rayon` feature), returning the results
+/// in item order.
+#[cfg(feature = "rayon")]
+pub(crate) fn map_items<T: Sync, U: Send>(
+    items: &[T],
+    f: impl Fn(&T) -> U + Sync + Send,
+) -> Vec<U> {
+    use rayon::prelude::*;
+    items.par_iter().map(f).collect()
+}
+
+/// Sequential fallback.
+#[cfg(not(feature = "rayon"))]
+pub(crate) fn map_items<T: Sync, U: Send>(
+    items: &[T],
+    f: impl Fn(&T) -> U + Sync + Send,
+) -> Vec<U> {
+    items.iter().map(f).collect()
+}
+
 /// Sorts by `cmp`, which must order primarily by `x(e)` ascending: elements are first
 /// distributed into buckets of nearby `x` (a linear counting pass), then each bucket is
 /// sorted (in parallel with the `rayon` feature). Much more cache-friendly than one global

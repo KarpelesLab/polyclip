@@ -404,7 +404,18 @@ fn nesting_sweep(edges: &[DirEdge], rings: &[Vec<u32>], is_hole: &[bool]) -> Vec
 
 /// Full pipeline from boundary edges (in sweep order) to a canonical tree.
 pub(crate) fn assemble(edges: Vec<DirEdge>, keep_collinear: bool) -> PolyTree {
-    let (rings_idx, pinch) = link_rings(&edges);
+    let (rings, is_hole, parent) = assemble_rings(&edges, keep_collinear);
+    canonical_tree(rings, &is_hole, &parent)
+}
+
+/// Rings (canonical start, collinear vertices removed unless `keep_collinear`), hole flags
+/// and parents (indices into the rings) from boundary edges in sweep order.
+#[allow(clippy::type_complexity)]
+pub(crate) fn assemble_rings(
+    edges: &[DirEdge],
+    keep_collinear: bool,
+) -> (Vec<RawRing>, Vec<bool>, Vec<Option<u32>>) {
+    let (rings_idx, pinch) = link_rings(edges);
     let pts_of =
         |r: &Vec<u32>| -> Vec<Point> { r.iter().map(|&k| edges[k as usize].from).collect() };
     // Degenerate loops cannot occur for valid arrangements; drop them defensively.
@@ -417,9 +428,9 @@ pub(crate) fn assemble(edges: Vec<DirEdge>, keep_collinear: bool) -> PolyTree {
         .map(|r| ring_area2(&pts_of(r)) < 0)
         .collect();
     let parent = if pinch.is_empty() {
-        nesting_regions(&edges, &rings_idx)
+        nesting_regions(edges, &rings_idx)
     } else {
-        nesting_sweep(&edges, &rings_idx, &is_hole)
+        nesting_sweep(edges, &rings_idx, &is_hole)
     };
     let mut rings: Vec<RawRing> = rings_idx
         .iter()
@@ -435,7 +446,7 @@ pub(crate) fn assemble(edges: Vec<DirEdge>, keep_collinear: bool) -> PolyTree {
         }
         rotate_to_min(r);
     }
-    canonical_tree(rings, &is_hole, &parent)
+    (rings, is_hole, parent)
 }
 
 /// Orders the rings canonically (children by vertex sequence, depth-first numbering).

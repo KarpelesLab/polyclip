@@ -130,6 +130,7 @@ mod arc;
 mod arrangement;
 mod assemble;
 mod boolean;
+mod cluster;
 mod curved;
 mod decompose;
 mod dir;
@@ -153,7 +154,7 @@ mod wide;
 pub use arc::{ArcTol, Circle, Contour, Curve, MAX_ARC_VERTICES, Shape, Side, arcs_from_tags};
 pub use boolean::{
     Boolean, ClippedPaths, FillRule, Op, PathSource, RingSource, VertexVisitor, boolean,
-    clip_paths, union_all,
+    clip_paths, set_always_monolithic, union_all,
 };
 pub use curved::curved_boolean;
 pub use decompose::{Trapezoid, trapezoids};
