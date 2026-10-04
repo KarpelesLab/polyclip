@@ -163,25 +163,45 @@ impl Grid {
             return None;
         }
         let (start, items) = if crate::par::threads() > 1 {
-            // (cell, segment) keys sorted: the same lists as the stable counting sort.
+            // Per range of cells, the (cell, segment) pairs in segment order, then a
+            // stable counting sort per range: the same lists as one global counting sort.
+            let nc = nx * ny;
+            let nr = (crate::par::threads() * 4).min(nc).max(1);
+            let rs = nc.div_ceil(nr);
             let parts = crate::par::map_ranges(n, |range| {
-                let mut keys: Vec<u64> = Vec::new();
+                let mut v: Vec<Vec<(u32, u32)>> = vec![Vec::new(); nr];
                 for i in range {
                     cells(i, &mut |cx, cy| {
-                        keys.push(((cy * nx + cx) as u64) << 32 | i as u64)
+                        let c = cy * nx + cx;
+                        v[c / rs].push((c as u32, i as u32))
                     });
                 }
-                keys
+                v
             });
-            let mut keys = crate::par::concat(&parts, |p| &p[..]);
-            drop(parts);
-            crate::par::sort_unstable(&mut keys);
-            let parts = crate::par::map_ranges(nx * ny + 1, |r| {
-                r.map(|c| keys.partition_point(|&k| k >> 32 < c as u64) as u32)
-                    .collect::<Vec<u32>>()
+            let mut lists: Vec<(usize, Vec<_>)> = (0..nr).map(|r| (r, Vec::new())).collect();
+            for p in parts {
+                for (r, v) in p.into_iter().enumerate() {
+                    lists[r].1.push(v);
+                }
+            }
+            let outs = crate::par::map_vec(lists, |(r, ls)| {
+                let c0 = (r * rs).min(nc);
+                let c1 = ((r + 1) * rs).min(nc);
+                let pairs: Vec<(u32, u32)> = ls
+                    .into_iter()
+                    .flatten()
+                    .map(|(c, i)| (c - c0 as u32, i))
+                    .collect();
+                csr(c1 - c0, &pairs)
             });
-            let start = crate::par::concat_vecs(parts);
-            (start, crate::par::map_slice(&keys, |&k| k as u32))
+            let mut start = Vec::with_capacity(nc + 1);
+            start.push(0u32);
+            for (st, _) in &outs {
+                let base = start[start.len() - 1];
+                start.extend(st[1..].iter().map(|&x| x + base));
+            }
+            let items = crate::par::concat_vecs(outs.into_iter().map(|o| o.1).collect());
+            (start, items)
         } else {
             let mut pairs: Vec<(u32, u32)> = Vec::with_capacity(counts.iter().sum());
             for i in 0..n {

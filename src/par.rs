@@ -68,10 +68,19 @@ pub(crate) fn concat<P: Sync, T: Copy + Send + Sync>(
         (0..total)
             .into_par_iter()
             .with_min_len(1 << 12)
-            .map(|i| {
-                let p = start.partition_point(|&s| s <= i) - 1;
-                part(&parts[p])[i - start[p]]
-            })
+            .map_init(
+                || usize::MAX,
+                |p, i| {
+                    // Indices come in increasing runs: advance the part from the last one.
+                    if *p >= parts.len() || i < start[*p] {
+                        *p = start.partition_point(|&s| s <= i) - 1;
+                    }
+                    while start[*p + 1] <= i {
+                        *p += 1;
+                    }
+                    part(&parts[*p])[i - start[*p]]
+                },
+            )
             .collect_into_vec(&mut out);
         return out;
     }
