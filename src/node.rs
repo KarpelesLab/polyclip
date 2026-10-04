@@ -162,7 +162,7 @@ impl Grid {
         if counts.iter().fold(0usize, |a, &c| a.saturating_add(c)) > budget {
             return None;
         }
-        let (start, items) = if crate::par::threads() > 1 {
+        let (start, items) = if crate::par::threads() > 1 && n >= 1 << 15 {
             // Per range of cells, the (cell, segment) pairs in segment order, then a
             // stable counting sort per range: the same lists as one global counting sort.
             let nc = nx * ny;

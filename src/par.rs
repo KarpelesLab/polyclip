@@ -15,6 +15,9 @@ pub(crate) fn map_ranges<T: Send>(n: usize, f: impl Fn(Range<usize>) -> T + Sync
     } else {
         (threads * 8).min(n / 512).max(1)
     };
+    if chunks == 1 {
+        return vec![f(0..n)];
+    }
     let size = n.div_ceil(chunks).max(1);
     (0..chunks)
         .into_par_iter()
@@ -39,14 +42,11 @@ pub(crate) fn map_chunks<T: Send>(
     let size = n.div_ceil(chunks).max(1);
     let range = |k: usize| (k * size).min(n)..((k + 1) * size).min(n);
     #[cfg(feature = "rayon")]
-    {
+    if chunks > 1 {
         use rayon::prelude::*;
-        (0..chunks).into_par_iter().map(|k| f(range(k))).collect()
+        return (0..chunks).into_par_iter().map(|k| f(range(k))).collect();
     }
-    #[cfg(not(feature = "rayon"))]
-    {
-        (0..chunks).map(|k| f(range(k))).collect()
-    }
+    (0..chunks).map(|k| f(range(k))).collect()
 }
 
 /// Concatenates the slices `part(p)` of all `parts` (copying in parallel with the `rayon`
@@ -115,14 +115,11 @@ pub(crate) fn concat_vecs<T: Copy + Send + Sync>(parts: Vec<Vec<T>>) -> Vec<T> {
 /// returns the results in item order.
 pub(crate) fn map_vec<T: Send, U: Send>(items: Vec<T>, f: impl Fn(T) -> U + Sync + Send) -> Vec<U> {
     #[cfg(feature = "rayon")]
-    {
+    if items.len() > 1 {
         use rayon::prelude::*;
-        items.into_par_iter().map(f).collect()
+        return items.into_par_iter().map(f).collect();
     }
-    #[cfg(not(feature = "rayon"))]
-    {
-        items.into_iter().map(f).collect()
-    }
+    items.into_iter().map(f).collect()
 }
 
 /// Maps a slice (in parallel with the `rayon` feature when it is large), in order.
@@ -146,6 +143,9 @@ pub(crate) fn map_items<T: Sync, U: Send>(
     f: impl Fn(&T) -> U + Sync + Send,
 ) -> Vec<U> {
     use rayon::prelude::*;
+    if items.len() <= 1 {
+        return items.iter().map(f).collect();
+    }
     items.par_iter().map(f).collect()
 }
 
