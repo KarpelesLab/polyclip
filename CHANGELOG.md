@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.6](https://github.com/KarpelesLab/polyclip/compare/v0.0.5...v0.0.6) - 2026-10-05
+
+### Added
+
+- add Prepared geometries for repeated DRC queries
+
+### Fixed
+
+- avoid usize overflow when choosing sweep bands on 32-bit targets
+
+### Other
+
+- Prepared is Send + Sync and shareable across threads
+- compact grid and bucket sort when simplifying polygon sets
+- sort validation keys by buckets of x
+- rebuild the ZoneFill result tree by moving unchanged rings
+- triangulate with bucket sorts and a narrow exact in-circle test
+- clip open paths cluster by cluster
+- describe parallelism within a boolean cluster, update circles numbers
+- keep small inputs off the parallel grid build; run single pieces inline
+- group grid cell lists by cell range instead of sorting; faster parallel concat
+- keep edge copies in the sweep status for cache-friendly searches
+- build the uniform noding grid's cell lists and leaves in parallel
+- replace sweep status edges in place, parallelize remaining large maps
+- parallel noding, merge and sweep within one boolean cluster
+- check fast offset paths against the reference pipeline
+- pass simple raw offset curves through, build raw curves in parallel
+
 ## [0.0.5](https://github.com/KarpelesLab/polyclip/compare/v0.0.4...v0.0.5) - 2026-10-04
 
 ### Other
