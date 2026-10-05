@@ -354,7 +354,7 @@ fn merge_lean(input: &[InEdge], chunks: Vec<Vec<Frag>>, engine: Engine) -> Lean 
         let mut xs: Vec<i64> = chunks.iter().flatten().step_by(step).map(lo_x).collect();
         xs.sort_unstable();
         for k in 1..want {
-            if let Some(&x) = xs.get(k * xs.len() / want) {
+            if let Some(&x) = xs.get(quantile(k, xs.len(), want)) {
                 bounds.push(x);
             }
         }
@@ -518,6 +518,11 @@ fn boundary_sequential(
     out
 }
 
+/// `k * n / parts` without overflowing `usize` on 32-bit targets (`k <= parts`).
+fn quantile(k: usize, n: usize, parts: usize) -> usize {
+    (k as u64 * n as u64 / parts as u64) as usize
+}
+
 /// Band boundaries for [`boundary_banded`] as edge indices `0 = c_0 < c_1 < ... = n`; band
 /// `k` holds the vertices `v` with `lo(c_k) <= v < lo(c_{k+1})`. A single band means one
 /// sweep.
@@ -533,7 +538,7 @@ fn band_cuts(segs: &[(Point, Point)], his: &[Point], engine: Engine) -> Vec<usiz
     if want > 1 {
         for k in 1..want {
             // Start of a vertex's group of edges.
-            let mut c = k * n / want;
+            let mut c = quantile(k, n, want);
             while c > 0 && c < n && segs[c].0 == segs[c - 1].0 {
                 c += 1;
             }
