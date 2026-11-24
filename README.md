@@ -102,6 +102,12 @@ Single thread unless noted, Apple Silicon laptop, release build (`cargo bench`,
 | … `validate_set` / `check_canonical` | ~39 ms / ~42 ms | | |
 | … `simplify_polygons` with 5 µm / 50 µm tolerance | ~40 ms / ~29 ms | | |
 
+(The rows of the cadlab GND pour's `opening`, `offset` and union with the spokes were
+measured with 0.0.6. That pour is one footprint many times over, and since 0.0.7 clusters
+that are another one moved are computed once: on the machine where both were measured, its
+`opening` takes 110 ms for 620 ms, its `offset` by −100 µm 35 ms for 80 ms and the union
+with the spokes 7 ms for 12.5 ms, single-threaded.)
+
 The noder adapts its spatial index to the data (uniform grid or k-d tree, sweeps along
 the direction in which the segments are thinnest, including the dominant segment
 direction), and distance queries use direction-adaptive sweeps and bounding-volume
