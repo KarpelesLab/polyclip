@@ -103,8 +103,8 @@ The noder adapts its spatial index to the data (uniform grid or k-d tree, sweeps
 the direction in which the segments are thinnest, including the dominant segment
 direction), and distance queries use direction-adaptive sweeps and bounding-volume
 hierarchies, so long, dense or parallel edges at any angle do not degrade into quadratic
-behaviour. Booleans split their input into clusters of rings that cannot interact (no edge
-boxes within a unit of each other) and compute each on its own, in parallel with `rayon`;
+behaviour. Booleans split their input into clusters of rings that cannot interact (no
+edges within three units of each other) and compute each on its own, in parallel with `rayon`;
 a lone simple ring is only located and passed through, so a small operand meeting a few
 rings of a large one costs little more than reading it. Within one large cluster, every
 phase runs in parallel with `rayon`: noding by leaf and segment ranges, fragment merging by

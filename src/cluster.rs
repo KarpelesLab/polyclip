@@ -1,40 +1,47 @@
 //! Clustered booleans: groups of input rings that cannot interact are computed independently.
 //!
-//! Snap rounding is local to the bounding boxes of the segments: every hot pixel centre (an
-//! endpoint, or a crossing rounded to the nearest integer point, hence within the integer
-//! boxes of both segments) lies in the box of the segments producing it, and a segment
-//! meeting a pixel, or carrying its centre, has the centre in its own box. Rings are grouped
-//! into clusters: two rings are in the same cluster when the boxes of some of their edges
-//! come within [`MARGIN`] of each other (transitively). The union `T(C)` of the edge boxes
-//! of a cluster `C` is connected and meets no edge of any other cluster. Then:
+//! Snap rounding is local. A hot pixel centre is an endpoint of a segment or a crossing of
+//! two segments rounded to the nearest integer point, hence within `sqrt(2)/2` of the
+//! segments producing it. A segment is only related to a pixel whose centre is within one
+//! unit of its box and within `0.75` of its line (see `node::relation`), hence within `1.6`
+//! of the segment; and a rerouted segment stays within `sqrt(2)/2` of where it was. So two
+//! segments farther than `1.6 + sqrt(2)/2 < 2.4` from each other have nothing to do with
+//! each other: neither meets a pixel of the other, and their fragments never touch.
+//!
+//! Rings are grouped into clusters: two rings are in the same cluster when some of their
+//! edges come within [`REACH`] (3 units) of each other (transitively). Then:
 //!
 //! * the noded arrangement of all rings is the union of the arrangements of the clusters
-//!   (no hot pixel, crossing or T-junction of one cluster lies in another's boxes), and the
-//!   noded edges of `C` stay in `T(C)`;
-//! * every ring of another cluster winds a constant number of times around all of `T(C)`:
+//!   (no hot pixel, crossing or T-junction of one cluster is within reach of another's
+//!   segments), and the noded edges of a cluster `C` stay within `sqrt(2)/2` of its edges;
+//! * let `N(C)` be the points within `sqrt(2)/2` of the edges of `C`, with a segment between
+//!   the two nearest points of every two rings that made `C` one cluster (no longer than
+//!   [`REACH`]): `N(C)` is connected, and no edge of another cluster, as given or rounded,
+//!   meets it (it would be within `REACH / 2 + sqrt(2)/2 < REACH` of an edge of `C`). So
+//!   every ring of another cluster winds a constant number of times around all of `N(C)`:
 //!   its contribution to the winding numbers along `C`'s edges (the *base winding* of `C`)
 //!   is found by locating one point of `C`;
-//! * likewise every output ring of another cluster contains either all of `T(C)` or none of
+//! * likewise every output ring of another cluster contains either all of `N(C)` or none of
 //!   it, so it never lies between two nested output rings of `C`: nesting within a cluster is
 //!   local, and the parent of a cluster's top-level rings is the innermost output ring of the
 //!   other clusters containing a point of the cluster.
 //!
 //! So rings are computed cluster by cluster (in parallel with the `rayon` feature), a lone
 //! simple ring directly, and the canonical tree built from all of them is the one the whole
-//! input computed at once gives (tests compare both). Cluster detection is cheap (ring
-//! boxes, then boxes of chunks of consecutive edges) and gives up early when ring boxes
-//! overlap too much for it to pay off.
+//! input computed at once gives (tests compare both). Cluster detection is cheap: ring
+//! boxes, then a descent of a tree of boxes over each ring's edges, then the distance of the
+//! few edges whose boxes come within reach. It gives up when that takes too long.
 
 use crate::arrangement::InEdge;
 use crate::assemble::{RawRing, assemble_rings, canonical_tree, remove_collinear, rotate_to_min};
 use crate::boolean::compute;
 use crate::geom::{Point, PolyTree, Rect};
-use crate::predicates::{dot, orient, segments_intersect, sub};
+use crate::predicates::{cross, dot, orient, segments_intersect, sub};
 use crate::query::ring_area2;
 
-/// Edges whose boxes come within this distance are in the same cluster. Boxes merely not
-/// meeting would do (see above); one unit of margin is kept for good measure.
-const MARGIN: i64 = 1;
+/// Edges within this distance of each other are in the same cluster (see the module
+/// documentation: anything above 2.4 would do).
+const REACH: i64 = 3;
 /// Smaller inputs are always computed in one piece.
 const MIN_EDGES: usize = 1024;
 /// Consecutive edges per chunk box.
@@ -64,23 +71,55 @@ impl UnionFind {
     }
 }
 
-/// The input rings: edge ranges, bounding boxes, and boxes of chunks of [`CHUNK`]
-/// consecutive edges.
+/// Squared distance from `p` to the segment `a-b` (`a != b`), in floating point from exact
+/// products: off by a relative `2^-50` at most.
+#[inline]
+fn point_segment_dist2(p: Point, a: Point, b: Point) -> f64 {
+    let (d, w) = (sub(b, a), sub(p, a));
+    let (t, l2) = (dot(w, d), dot(d, d));
+    if t <= 0 {
+        dot(w, w) as f64
+    } else if t >= l2 {
+        let v = sub(p, b);
+        dot(v, v) as f64
+    } else {
+        let c = cross(d, w) as f64;
+        c * c / l2 as f64
+    }
+}
+
+/// Whether the segments `a` and `b` come within [`REACH`] of each other (segments at that
+/// very distance, to a part in `2^50`, may be reported either way).
+#[inline]
+fn within_reach(a: (Point, Point), b: (Point, Point)) -> bool {
+    let r2 = (REACH * REACH) as f64;
+    segments_intersect(a.0, a.1, b.0, b.1)
+        || point_segment_dist2(a.0, b.0, b.1) <= r2
+        || point_segment_dist2(a.1, b.0, b.1) <= r2
+        || point_segment_dist2(b.0, a.0, a.1) <= r2
+        || point_segment_dist2(b.1, a.0, a.1) <= r2
+}
+
+/// The input rings: edge ranges, bounding boxes, and for every ring a binary tree of boxes
+/// over its chunks of [`CHUNK`] consecutive edges.
 struct Rings<'a> {
     edges: &'a [InEdge],
     start: Vec<u32>,
     bbox: Vec<Rect>,
-    chunk_start: Vec<u32>,
-    chunks: Vec<Rect>,
+    /// The tree of ring `r` is `tree[tree_start[r]..tree_start[r + 1]]`, in heap layout: for
+    /// `m` chunks, slot `m + k` is the box of chunk `k` and slot `i < m` the union of slots
+    /// `2 i` and `2 i + 1`; slot 1 is the root and slot 0 is not used.
+    tree_start: Vec<u32>,
+    tree: Vec<Rect>,
 }
 
 impl<'a> Rings<'a> {
     fn new(edges: &'a [InEdge], ring_starts: &[u32]) -> Self {
         let mut start = Vec::with_capacity(ring_starts.len() + 1);
         let mut bbox = Vec::with_capacity(ring_starts.len());
-        let mut chunk_start = Vec::with_capacity(ring_starts.len() + 1);
-        let mut chunks = Vec::with_capacity(edges.len() / CHUNK + ring_starts.len());
-        chunk_start.push(0);
+        let mut tree_start = Vec::with_capacity(ring_starts.len() + 1);
+        let mut tree = Vec::with_capacity(2 * (edges.len() / CHUNK + ring_starts.len()));
+        tree_start.push(0);
         for (i, &s) in ring_starts.iter().enumerate() {
             let e = ring_starts.get(i + 1).map_or(edges.len(), |&e| e as usize);
             let s = s as usize;
@@ -88,25 +127,30 @@ impl<'a> Rings<'a> {
                 continue;
             }
             start.push(s as u32);
-            let mut rb = Rect::new(edges[s].a, edges[s].b);
+            let m = (e - s).div_ceil(CHUNK);
+            let base = tree.len();
+            let none = Rect::new(edges[s].a, edges[s].a);
+            tree.resize(base + m, none);
             for c in edges[s..e].chunks(CHUNK) {
                 let mut b = Rect::new(c[0].a, c[0].b);
                 for x in &c[1..] {
                     b.add_point(x.b);
                 }
-                rb = rb.union(&b);
-                chunks.push(b);
+                tree.push(b);
             }
-            bbox.push(rb);
-            chunk_start.push(chunks.len() as u32);
+            for k in (1..m).rev() {
+                tree[base + k] = tree[base + 2 * k].union(&tree[base + 2 * k + 1]);
+            }
+            bbox.push(tree[base + 1]);
+            tree_start.push(tree.len() as u32);
         }
         start.push(edges.len() as u32);
         Rings {
             edges,
             start,
             bbox,
-            chunk_start,
-            chunks,
+            tree_start,
+            tree,
         }
     }
 
@@ -119,77 +163,53 @@ impl<'a> Rings<'a> {
         &self.edges[self.start[r] as usize..self.start[r + 1] as usize]
     }
 
-    /// Boxes of the edges of ring `r` meeting `g`, grown by `grow`. Returns the work done
-    /// (boxes tested).
-    fn edge_boxes(&self, r: usize, g: &Rect, grow: i64, out: &mut Vec<Rect>) -> usize {
-        out.clear();
-        let (s, e) = (
-            self.chunk_start[r] as usize,
-            self.chunk_start[r + 1] as usize,
-        );
-        let edges = self.edges(r);
-        let mut work = e - s;
-        for c in s..e {
-            if !self.chunks[c].intersects(g) {
+    /// Whether some edges of rings `a` and `b` come within [`REACH`] of each other, by a
+    /// descent of both trees. Adds the work done (boxes tested) to `work`; `stack` is
+    /// scratch space.
+    fn near(&self, a: usize, b: usize, work: &mut usize, stack: &mut Vec<(u32, u32)>) -> bool {
+        let (ta, tb) = (self.tree_start[a] as usize, self.tree_start[b] as usize);
+        // Number of chunks: half of the slots.
+        let ma = (self.tree_start[a + 1] as usize - ta) / 2;
+        let mb = (self.tree_start[b + 1] as usize - tb) / 2;
+        let (ea, eb) = (self.edges(a), self.edges(b));
+        let chunk = |e: &'a [InEdge], k: usize| &e[k * CHUNK..((k + 1) * CHUNK).min(e.len())];
+        stack.clear();
+        stack.push((1, 1));
+        while let Some((i, j)) = stack.pop() {
+            let (i, j) = (i as usize, j as usize);
+            *work += 1;
+            let (ba, bb) = (self.tree[ta + i], self.tree[tb + j]);
+            let ga = ba.expand(REACH);
+            if !ga.intersects(&bb) {
                 continue;
             }
-            let k = (c - s) * CHUNK;
-            let ch = &edges[k..(k + CHUNK).min(edges.len())];
-            work += ch.len();
-            out.extend(
-                ch.iter()
-                    .map(|e| Rect::new(e.a, e.b))
-                    .filter(|b| b.intersects(g))
-                    .map(|b| b.expand(grow)),
-            );
-        }
-        work
-    }
-
-    /// Whether some edges of rings `a` and `b` have boxes within [`MARGIN`]. Adds the work
-    /// done (boxes tested) to `work`.
-    fn near(
-        &self,
-        a: usize,
-        b: usize,
-        work: &mut usize,
-        la: &mut Vec<Rect>,
-        lb: &mut Vec<Rect>,
-    ) -> bool {
-        let ga = self.bbox[a].expand(MARGIN);
-        let gb = self.bbox[b].expand(MARGIN);
-        *work += self.edge_boxes(a, &gb, MARGIN, la);
-        if la.is_empty() {
-            return false;
-        }
-        *work += self.edge_boxes(b, &ga, 0, lb);
-        if lb.is_empty() {
-            return false;
-        }
-        if la.len() * lb.len() <= 64 {
-            *work += la.len() * lb.len();
-            return la.iter().any(|x| lb.iter().any(|y| x.intersects(y)));
-        }
-        // Sweep along x over both lists.
-        la.sort_unstable_by_key(|b| b.min.x);
-        lb.sort_unstable_by_key(|b| b.min.x);
-        let (mut i, mut j) = (0, 0);
-        while i < la.len() && j < lb.len() {
-            // Test the box starting first against the other list's boxes starting before its end.
-            let (x, rest) = if la[i].min.x <= lb[j].min.x {
-                i += 1;
-                (&la[i - 1], &lb[j..])
-            } else {
-                j += 1;
-                (&lb[j - 1], &la[i..])
-            };
-            for y in rest {
-                *work += 1;
-                if y.min.x > x.max.x {
-                    break;
+            match (i >= ma, j >= mb) {
+                (true, true) => {
+                    for e in chunk(ea, i - ma) {
+                        let ge = Rect::new(e.a, e.b).expand(REACH);
+                        if !ge.intersects(&bb) {
+                            continue;
+                        }
+                        for f in chunk(eb, j - mb) {
+                            *work += 1;
+                            if ge.intersects(&Rect::new(f.a, f.b))
+                                && within_reach((e.a, e.b), (f.a, f.b))
+                            {
+                                return true;
+                            }
+                        }
+                    }
                 }
-                if x.intersects(y) {
-                    return true;
+                // Split the larger box (a leaf cannot be split).
+                (la, lb) => {
+                    let size = |r: &Rect| r.width().max(r.height());
+                    if lb || (!la && size(&ba) >= size(&bb)) {
+                        stack.push((2 * i as u32, j as u32));
+                        stack.push((2 * i as u32 + 1, j as u32));
+                    } else {
+                        stack.push((i as u32, 2 * j as u32));
+                        stack.push((i as u32, 2 * j as u32 + 1));
+                    }
                 }
             }
         }
@@ -209,7 +229,7 @@ struct Clusters {
 fn find_clusters(rings: &Rings<'_>, force: bool) -> Option<Clusters> {
     let n = rings.len();
     let total = rings.bbox.iter().copied().reduce(|a, b| a.union(&b))?;
-    let area = |b: &Rect| (b.width() + 2 * MARGIN) as f64 * (b.height() + 2 * MARGIN) as f64;
+    let area = |b: &Rect| (b.width() + 2 * REACH) as f64 * (b.height() + 2 * REACH) as f64;
     // Heavily overlapping boxes: one big cluster, or too many candidate pairs.
     if !force && rings.bbox.iter().map(area).sum::<f64>() > 3.0 * area(&total) {
         return None;
@@ -225,9 +245,9 @@ fn find_clusters(rings: &Rings<'_>, force: bool) -> Option<Clusters> {
     let mut work = 0usize;
     let mut uf = UnionFind((0..n as u32).collect());
     let mut active: Vec<u32> = Vec::new();
-    let (mut ca, mut cb) = (Vec::new(), Vec::new());
+    let mut stack = Vec::new();
     for &r in &order {
-        let b = rings.bbox[r as usize].expand(MARGIN);
+        let b = rings.bbox[r as usize].expand(REACH);
         let lo = axis(b.min);
         active.retain(|&o| axis(rings.bbox[o as usize].max) >= lo);
         work += active.len();
@@ -235,7 +255,7 @@ fn find_clusters(rings: &Rings<'_>, force: bool) -> Option<Clusters> {
             if !b.intersects(&rings.bbox[o as usize]) || uf.find(o) == uf.find(r) {
                 continue;
             }
-            if rings.near(r as usize, o as usize, &mut work, &mut ca, &mut cb) {
+            if rings.near(r as usize, o as usize, &mut work, &mut stack) {
                 uf.union(r, o);
             }
         }
@@ -796,6 +816,135 @@ mod tests {
             }
         }
         true
+    }
+
+    /// [`Rings::near`] against all pairs of edges, and [`within_reach`] against the exact
+    /// squared distance.
+    #[test]
+    fn near_matches_brute_force() {
+        let mut s: u64 = 0xc1u64;
+        let mut rnd = |m: i64| {
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((s >> 33) as i64).rem_euclid(m)
+        };
+        // Exact: twice the squared distance of two segments that do not meet is the least
+        // of the four from an end to the other segment.
+        let exact = |a: (Point, Point), b: (Point, Point)| -> bool {
+            let d2 = |p: Point, (u, v): (Point, Point)| -> (i128, i128) {
+                let (d, w) = (sub(v, u), sub(p, u));
+                let (t, l2) = (dot(w, d), dot(d, d));
+                if t <= 0 {
+                    (dot(w, w), 1)
+                } else if t >= l2 {
+                    (dot(sub(p, v), sub(p, v)), 1)
+                } else {
+                    let c = cross(d, w);
+                    (c * c, l2)
+                }
+            };
+            let r2 = (REACH * REACH) as i128;
+            segments_intersect(a.0, a.1, b.0, b.1)
+                || [d2(a.0, b), d2(a.1, b), d2(b.0, a), d2(b.1, a)]
+                    .iter()
+                    .any(|&(n, d)| n <= r2 * d)
+        };
+        let (mut near, mut far) = (0, 0);
+        for it in 0..3000 {
+            // Two rings of random steps, the second some way off: zigzags, long thin
+            // diagonals, many chunks or a single one.
+            let mut edges: Vec<InEdge> = Vec::new();
+            let mut starts = Vec::new();
+            let step = 1 + rnd(if it % 2 == 0 { 6 } else { 60 });
+            for k in 0..2 {
+                starts.push(edges.len() as u32);
+                let n = 3 + rnd(if it % 5 == 0 { 120 } else { 20 }) as usize;
+                let o = Point::new(k * rnd(8 * step), k * rnd(8 * step));
+                let mut pts: Vec<Point> = Vec::new();
+                let mut p = o;
+                for _ in 0..n {
+                    pts.push(p);
+                    p = Point::new(p.x + rnd(2 * step) - step, p.y + rnd(2 * step) - step);
+                }
+                pts.dedup();
+                while pts.len() > 1 && pts[0] == *pts.last().unwrap() {
+                    pts.pop();
+                }
+                for i in 0..pts.len() {
+                    let (a, b) = (pts[i], pts[(i + 1) % pts.len()]);
+                    if a != b {
+                        edges.push(InEdge {
+                            a,
+                            b,
+                            tag: 0,
+                            operand: 0,
+                        });
+                    }
+                }
+            }
+            let rings = Rings::new(&edges, &starts);
+            if rings.len() < 2 {
+                continue;
+            }
+            let brute = rings
+                .edges(0)
+                .iter()
+                .any(|e| rings.edges(1).iter().any(|f| exact((e.a, e.b), (f.a, f.b))));
+            for e in rings.edges(0) {
+                for f in rings.edges(1) {
+                    assert_eq!(
+                        within_reach((e.a, e.b), (f.a, f.b)),
+                        exact((e.a, e.b), (f.a, f.b)),
+                        "{e:?} {f:?}"
+                    );
+                }
+            }
+            let (mut work, mut stack) = (0, Vec::new());
+            assert_eq!(rings.near(0, 1, &mut work, &mut stack), brute, "{edges:?}");
+            assert_eq!(rings.near(1, 0, &mut work, &mut stack), brute, "{edges:?}");
+            if brute {
+                near += 1;
+            } else {
+                far += 1;
+            }
+        }
+        assert!(near > 300 && far > 300, "{near} {far}");
+    }
+
+    /// Rings a few units apart, on either side of [`REACH`], alone or with crossings and
+    /// vertices on the grid lines between them: the same in clusters as in one piece.
+    #[test]
+    fn clusters_at_reach_match_one_piece() {
+        use crate::{Boolean, FillRule, Ring};
+        for gap in 0..7i64 {
+            for skew in [0i64, 1, 2, 5] {
+                let mut rings: Vec<Ring> = Vec::new();
+                for k in 0..40i64 {
+                    let x = k * (20 + gap);
+                    // A bow tie (crossing at a half-integer point) and a ring leaning
+                    // towards the next one.
+                    rings.push(Ring::from([(x, 0), (x + 20, 21), (x + 20, 0), (x, 21)]));
+                    rings.push(Ring::from([
+                        (x, 30),
+                        (x + 20, 30 + skew),
+                        (x + 20 + skew, 51),
+                        (x, 51 + skew),
+                    ]));
+                    rings.push(Ring::from([
+                        (x + 3, 51 + skew + gap),
+                        (x + 17, 52 + gap),
+                        (x + 9, 70),
+                    ]));
+                }
+                for rule in [FillRule::NonZero, FillRule::EvenOdd, FillRule::Positive] {
+                    let run = |b: Boolean| b.subject(&rings, rule).execute_tree().unwrap();
+                    let clustered = run(Boolean::new().force_clusters(true));
+                    let whole = run(Boolean::new().monolithic(true));
+                    assert!(clustered == whole, "gap {gap} skew {skew} {rule:?}");
+                }
+            }
+        }
     }
 
     #[test]
