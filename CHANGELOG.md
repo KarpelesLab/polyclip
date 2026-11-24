@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.7](https://github.com/KarpelesLab/polyclip/compare/v0.0.6...v0.0.7) - 2026-11-24
+
+### Added
+
+- Memo keeps the results of clusters of rings between operations
+
+### Other
+
+- box trees with a box for each edge of small rings, chunks tried by their boxes first
+- benchmark of round-join offsets on pours (examples/offset_bench.rs)
+- cluster rings by the distance of their edges, found by trees of boxes
+
 ## [0.0.6](https://github.com/KarpelesLab/polyclip/compare/v0.0.5...v0.0.6) - 2026-10-05
 
 ### Added
