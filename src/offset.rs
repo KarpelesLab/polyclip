@@ -19,6 +19,7 @@ use crate::arc::{ArcStep, ArcTol, Circle, arc_points_with, round_pt};
 use crate::boolean::{Boolean, FillRule, PathSource, RingSource};
 use crate::error::{Error, Result};
 use crate::geom::{Point, PolyTree, Polygon, PolygonSet, Ring, TaggedRing};
+use crate::memo::Memo;
 
 /// How offset edges are connected at convex corners.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -405,6 +406,18 @@ pub fn offset_tagged(
     tol: ArcTol,
     corner_tag: u64,
 ) -> Result<PolyTree> {
+    offset_tagged_in(input, delta, join, tol, corner_tag, None)
+}
+
+/// [`offset_tagged`], its unions with a [`Memo`] or without.
+fn offset_tagged_in(
+    input: &(impl RingSource + ?Sized),
+    delta: i64,
+    join: Join,
+    tol: ArcTol,
+    corner_tag: u64,
+    memo: Option<&Memo>,
+) -> Result<PolyTree> {
     check_delta(delta)?;
     // Already canonical polygons (e.g. the output of an earlier boolean) are a fixed point
     // of normalization: offset them directly.
@@ -413,18 +426,19 @@ pub fn offset_tagged(
         let rings: Vec<&Ring> = polys.iter().flat_map(|p| p.rings()).collect();
         let (raw, through) =
             raw_cycles(&rings, |r| (&r.0[..], None), delta, join, tol, corner_tag)?;
-        return union_raw(&raw, !through);
+        return union_raw(&raw, !through, memo);
     }
     let mut count = 0usize;
     input.visit_rings(&mut |_, _| count += 1);
-    let norm = Boolean::new()
+    let mut norm = Boolean::new()
         .subject(input, FillRule::NonZero)
-        .force_clusters(count == 1 && !reference())
-        .execute_tree()?;
+        .force_clusters(count == 1 && !reference());
+    norm.set_memo(memo);
+    let norm = norm.execute_tree()?;
     if delta == 0 {
         return Ok(norm);
     }
-    offset_canonical_tree(&norm, delta, join, tol, corner_tag)
+    offset_canonical_tree(&norm, delta, join, tol, corner_tag, memo)
 }
 
 /// Offsets a canonical tree (the output of a boolean) without re-normalizing it.
@@ -434,6 +448,7 @@ fn offset_canonical_tree(
     join: Join,
     tol: ArcTol,
     corner_tag: u64,
+    memo: Option<&Memo>,
 ) -> Result<PolyTree> {
     let (raw, through) = raw_cycles(
         &norm.nodes,
@@ -443,7 +458,7 @@ fn offset_canonical_tree(
         tol,
         corner_tag,
     )?;
-    union_raw(&raw, !through)
+    union_raw(&raw, !through, memo)
 }
 
 /// Raw offset curves of closed rings (`ring` gives the points and edge tags of each; no
@@ -519,11 +534,12 @@ fn raw_cycles<T: Sync>(
 /// loops through original vertices), a single curve that is a simple ring (a convex polygon
 /// grown, say) is recognized by the clustered pipeline and passed through without noding;
 /// the result is the same either way.
-fn union_raw(rings: &[TaggedRing], maybe_simple: bool) -> Result<PolyTree> {
-    Boolean::new()
+fn union_raw(rings: &[TaggedRing], maybe_simple: bool, memo: Option<&Memo>) -> Result<PolyTree> {
+    let mut union = Boolean::new()
         .subject(rings, FillRule::Positive)
-        .force_clusters(maybe_simple && rings.len() == 1 && !reference())
-        .execute_tree()
+        .force_clusters(maybe_simple && rings.len() == 1 && !reference());
+    union.set_memo(memo);
+    union.execute_tree()
 }
 
 std::thread_local! {
@@ -618,22 +634,89 @@ pub fn offset_shape_tagged(
 /// part narrower than `2 * d` (minimum-width enforcement for copper zones) while leaving
 /// wide parts essentially unchanged (convex corners get rounded with radius `d`).
 pub fn opening(input: &(impl RingSource + ?Sized), d: i64, tol: ArcTol) -> Result<PolygonSet> {
+    opening_in(input, d, tol, None)
+}
+
+fn opening_in(
+    input: &(impl RingSource + ?Sized),
+    d: i64,
+    tol: ArcTol,
+    memo: Option<&Memo>,
+) -> Result<PolygonSet> {
     let d = d
         .checked_abs()
         .ok_or(Error::InvalidParameter("offset delta too large"))?;
     // The intermediate tree is canonical: grow it directly.
-    let shrunk = offset_tagged(input, -d, Join::Round, tol, 0)?;
-    Ok(offset_canonical_tree(&shrunk, d, Join::Round, tol, 0)?.to_polygon_set())
+    let shrunk = offset_tagged_in(input, -d, Join::Round, tol, 0, memo)?;
+    Ok(offset_canonical_tree(&shrunk, d, Join::Round, tol, 0, memo)?.to_polygon_set())
 }
 
 /// Morphological closing: grow by `d`, then shrink by `d`, with round joins. Fills gaps and
 /// notches narrower than `2 * d`.
 pub fn closing(input: &(impl RingSource + ?Sized), d: i64, tol: ArcTol) -> Result<PolygonSet> {
+    closing_in(input, d, tol, None)
+}
+
+fn closing_in(
+    input: &(impl RingSource + ?Sized),
+    d: i64,
+    tol: ArcTol,
+    memo: Option<&Memo>,
+) -> Result<PolygonSet> {
     let d = d
         .checked_abs()
         .ok_or(Error::InvalidParameter("offset delta too large"))?;
-    let grown = offset_tagged(input, d, Join::Round, tol, 0)?;
-    Ok(offset_canonical_tree(&grown, -d, Join::Round, tol, 0)?.to_polygon_set())
+    let grown = offset_tagged_in(input, d, Join::Round, tol, 0, memo)?;
+    Ok(offset_canonical_tree(&grown, -d, Join::Round, tol, 0, memo)?.to_polygon_set())
+}
+
+impl Memo {
+    /// [`offset`] reusing the results this memo holds and keeping its own in it. The output
+    /// is that of [`offset`].
+    pub fn offset(
+        &self,
+        input: &(impl RingSource + ?Sized),
+        delta: i64,
+        join: Join,
+        tol: ArcTol,
+    ) -> Result<PolygonSet> {
+        Ok(offset_tagged_in(input, delta, join, tol, 0, Some(self))?.to_polygon_set())
+    }
+
+    /// [`offset_tagged`] reusing the results this memo holds and keeping its own in it. The
+    /// output is that of [`offset_tagged`].
+    pub fn offset_tagged(
+        &self,
+        input: &(impl RingSource + ?Sized),
+        delta: i64,
+        join: Join,
+        tol: ArcTol,
+        corner_tag: u64,
+    ) -> Result<PolyTree> {
+        offset_tagged_in(input, delta, join, tol, corner_tag, Some(self))
+    }
+
+    /// [`opening`] reusing the results this memo holds and keeping its own in it. The output
+    /// is that of [`opening`].
+    pub fn opening(
+        &self,
+        input: &(impl RingSource + ?Sized),
+        d: i64,
+        tol: ArcTol,
+    ) -> Result<PolygonSet> {
+        opening_in(input, d, tol, Some(self))
+    }
+
+    /// [`closing`] reusing the results this memo holds and keeping its own in it. The output
+    /// is that of [`closing`].
+    pub fn closing(
+        &self,
+        input: &(impl RingSource + ?Sized),
+        d: i64,
+        tol: ArcTol,
+    ) -> Result<PolygonSet> {
+        closing_in(input, d, tol, Some(self))
+    }
 }
 
 /// Cheap (linear) check that polygons are in the canonical form produced by booleans:
@@ -707,7 +790,7 @@ pub fn offset_paths_tagged(
     if let Some(e) = err {
         return Err(e);
     }
-    union_raw(&rings, !through)
+    union_raw(&rings, !through, None)
 }
 
 /// Offsets open paths by `delta >= 0` on both sides (strokes them with width `2 * delta`),
