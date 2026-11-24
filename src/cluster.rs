@@ -31,11 +31,16 @@
 //! input computed at once gives (tests compare both). Cluster detection is cheap: ring
 //! boxes, then a descent of a tree of boxes over each ring's edges, then the distance of the
 //! few edges whose boxes come within reach. It gives up when that takes too long.
+//!
+//! The result of a cluster moves with it (every predicate is exact and takes differences of
+//! coordinates; new vertices are exact roundings), so clusters that are another one moved
+//! are computed once, and a [`Memo`] keeps results for later operations (see `memo.rs`).
 
 use crate::arrangement::InEdge;
 use crate::assemble::{RawRing, assemble_rings, canonical_tree, remove_collinear, rotate_to_min};
 use crate::boolean::compute;
 use crate::geom::{Point, PolyTree, Rect};
+use crate::memo::{Memo, same_rings, signature};
 use crate::predicates::{cross, dot, orient, segments_intersect, sub};
 use crate::query::ring_area2;
 
@@ -595,11 +600,44 @@ fn ring_is_simple(p: &[Point]) -> bool {
 }
 
 /// The rings of one cluster: canonical rings, hole flags, parents within the cluster.
-#[derive(Default)]
-struct Part {
-    rings: Vec<RawRing>,
-    is_hole: Vec<bool>,
-    parent: Vec<Option<u32>>,
+#[derive(Clone, Default)]
+pub(crate) struct Part {
+    pub(crate) rings: Vec<RawRing>,
+    pub(crate) is_hole: Vec<bool>,
+    pub(crate) parent: Vec<Option<u32>>,
+}
+
+impl Part {
+    /// The same rings moved by `(dx, dy)`.
+    pub(crate) fn translated(&self, dx: i64, dy: i64) -> Part {
+        Part {
+            rings: self
+                .rings
+                .iter()
+                .map(|r| RawRing {
+                    pts: r
+                        .pts
+                        .iter()
+                        .map(|p| Point::new(p.x.wrapping_add(dx), p.y.wrapping_add(dy)))
+                        .collect(),
+                    tags: r.tags.clone(),
+                })
+                .collect(),
+            is_hole: self.is_hole.clone(),
+            parent: self.parent.clone(),
+        }
+    }
+
+    fn same(&self, o: &Part) -> bool {
+        self.is_hole == o.is_hole
+            && self.parent == o.parent
+            && self.rings.len() == o.rings.len()
+            && self
+                .rings
+                .iter()
+                .zip(&o.rings)
+                .all(|(a, b)| a.pts == b.pts && a.tags == b.tags)
+    }
 }
 
 /// The result of a lone simple ring with base winding `base`, as the full pipeline would
@@ -661,12 +699,17 @@ fn lone_ring(
 /// Computes the boolean of `edges` (rings starting at `ring_starts`) cluster by cluster, or
 /// returns `None` when the input does not split into several clusters (or is too small to
 /// bother). The result is identical to the one-piece computation.
+///
+/// Clusters with the same edges up to a translation (and the same winding of the others
+/// around them) are computed once. `memo` keeps the results of clusters across calls, with
+/// a code standing for `inside` and `keep_collinear`.
 pub(crate) fn execute(
     edges: &[InEdge],
     ring_starts: &[u32],
     inside: impl Fn([i32; 2]) -> bool + Sync + Send,
     keep_collinear: bool,
     force: bool,
+    memo: Option<(&Memo, u32)>,
 ) -> Option<PolyTree> {
     if !force && (edges.len() < MIN_EDGES || ring_starts.len() < 2) {
         return None;
@@ -712,16 +755,10 @@ pub(crate) fn execute(
     }
     // Every cluster on its own.
     let ids: Vec<u32> = (0..nc as u32).collect();
-    let parts: Vec<Part> = crate::par::map_items(&ids, |&c| {
-        let rs = cluster_rings(c as usize);
-        let b = base[c as usize];
-        if rs.len() == 1
-            && let Some(p) = lone_ring(rings.edges(rs[0] as usize), b, &inside, keep_collinear)
-        {
-            return p;
-        }
+    let noded = |c: usize| -> Part {
+        let b = base[c];
         let mut ce: Vec<InEdge> = Vec::new();
-        for &r in rs {
+        for &r in cluster_rings(c) {
             ce.extend_from_slice(rings.edges(r as usize));
         }
         let dir = compute(&ce, |w| inside([w[0] + b[0], w[1] + b[1]]));
@@ -731,7 +768,82 @@ pub(crate) fn execute(
             is_hole,
             parent,
         }
+    };
+    // Clusters that are an earlier one moved (the same edges relative to their first vertex
+    // and the same base winding) have its result, moved: `rep` is that earlier cluster.
+    let origin = |c: usize| rings.edges(cluster_rings(c)[0] as usize)[0].a;
+    let cluster_edges = |c: usize| cluster_rings(c).iter().map(|&r| rings.edges(r as usize));
+    let sig: Vec<u64> = crate::par::map_items(&ids, |&c| {
+        let c = c as usize;
+        signature(cluster_edges(c), origin(c), base[c])
     });
+    let mut rep: Vec<u32> = ids.clone();
+    let mut order: Vec<u32> = ids.clone();
+    order.sort_unstable_by_key(|&c| (sig[c as usize], c));
+    for run in order.chunk_by(|&a, &b| sig[a as usize] == sig[b as usize]) {
+        let first = run[0] as usize;
+        for &c in &run[1..] {
+            let c = c as usize;
+            if base[c] == base[first]
+                && same_rings(
+                    cluster_edges(first),
+                    origin(first),
+                    cluster_edges(c),
+                    origin(c),
+                )
+            {
+                rep[c] = first as u32;
+            }
+        }
+    }
+    let own: Vec<Option<Part>> = crate::par::map_items(&ids, |&c| {
+        let c = c as usize;
+        if rep[c] as usize != c {
+            return None;
+        }
+        let rs = cluster_rings(c);
+        if rs.len() == 1
+            && let Some(p) = lone_ring(
+                rings.edges(rs[0] as usize),
+                base[c],
+                &inside,
+                keep_collinear,
+            )
+        {
+            return Some(p);
+        }
+        let Some((memo, code)) = memo else {
+            return Some(noded(c));
+        };
+        if let Some(p) = memo.get(sig[c], code, base[c], cluster_edges(c), origin(c)) {
+            if crate::memo::verify() {
+                assert!(
+                    p.same(&noded(c)),
+                    "a memo result differs from the computed one"
+                );
+            }
+            return Some(p);
+        }
+        let p = noded(c);
+        memo.put(sig[c], code, base[c], cluster_edges(c), origin(c), &p);
+        Some(p)
+    });
+    let mut parts: Vec<Part> = Vec::with_capacity(nc);
+    for (c, p) in own.into_iter().enumerate() {
+        let p = p.unwrap_or_else(|| {
+            let r = rep[c] as usize;
+            let (to, from) = (origin(c), origin(r));
+            let p = parts[r].translated(to.x.wrapping_sub(from.x), to.y.wrapping_sub(from.y));
+            if crate::memo::verify() {
+                assert!(
+                    p.same(&noded(c)),
+                    "a moved cluster differs from the computed one"
+                );
+            }
+            p
+        });
+        parts.push(p);
+    }
     // Parents of the clusters' top-level rings: the innermost output ring of other clusters
     // around them (nested rings never share a vertex, so the smallest area decides).
     let need: Vec<bool> = parts.iter().map(|p| p.parent.contains(&None)).collect();

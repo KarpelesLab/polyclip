@@ -110,7 +110,7 @@
 //!
 //! | Area | Items |
 //! |---|---|
-//! | Booleans | [`Boolean`], [`boolean`], [`union_all`], [`clip_paths`], [`ZoneFill`] (incremental) |
+//! | Booleans | [`Boolean`], [`boolean`], [`union_all`], [`clip_paths`], [`ZoneFill`] (incremental), [`Memo`] (results kept between operations) |
 //! | Offsetting | [`offset`], [`offset_tree`], [`offset_tagged`], [`offset_paths`], [`offset_shape`], [`opening`], [`closing`] |
 //! | Curves | [`Circle`], [`Shape`], [`Curve`], [`ArcTol`], [`Side`], [`arcs_from_tags`], [`curved_boolean`] |
 //! | Queries | [`locate`], [`intersects`], [`contains`], [`area2`], [`centroid`], [`distance`], [`distance_less_than`], [`Prepared`] (indexed, for repeated queries against one geometry) |
@@ -142,6 +142,7 @@ mod fracture;
 mod geom;
 mod hull;
 mod incremental;
+mod memo;
 mod node;
 mod offset;
 mod par;
@@ -169,6 +170,7 @@ pub use fracture::{fracture, fracture_set};
 pub use geom::*;
 pub use hull::{convex_hull, convex_hull_of, minkowski_sum};
 pub use incremental::ZoneFill;
+pub use memo::{Memo, MemoStats, set_memo_verify};
 pub use offset::{
     EndCap, Join, closing, offset, offset_paths, offset_paths_tagged, offset_paths_tree,
     offset_shape, offset_shape_tagged, offset_tagged, offset_tree, opening, set_offset_reference,

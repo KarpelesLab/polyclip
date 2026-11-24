@@ -6,6 +6,7 @@ use crate::error::{Error, Result};
 use crate::geom::{
     Path, Point, PolyTree, Polygon, PolygonSet, Ring, TaggedPath, TaggedPolygon, TaggedRing,
 };
+use crate::memo::Memo;
 
 /// Rule deciding which regions are "inside" from their winding number.
 ///
@@ -216,6 +217,7 @@ pub struct Boolean {
     op: Op,
     keep_collinear: bool,
     clustering: Clustering,
+    memo: Option<Memo>,
     error: Option<Error>,
 }
 
@@ -253,6 +255,20 @@ impl Boolean {
     /// Keeps collinear vertices in the output (builder form). Off by default.
     pub fn keep_collinear(mut self, keep: bool) -> Self {
         self.keep_collinear = keep;
+        self
+    }
+
+    /// Reuses the results that `memo` holds for parts of the input that an earlier operation
+    /// had, and keeps this operation's for later ones (builder form). The output is the same
+    /// with and without it. See [`Memo`].
+    pub fn memo(mut self, memo: &Memo) -> Self {
+        self.memo = Some(memo.clone());
+        self
+    }
+
+    /// Sets or removes the [`Memo`] of this engine. See [`memo`](Self::memo).
+    pub fn set_memo(&mut self, memo: Option<&Memo>) -> &mut Self {
+        self.memo = memo.cloned();
         self
     }
 
@@ -362,6 +378,13 @@ impl Boolean {
                 inside,
                 self.keep_collinear,
                 self.clustering == Clustering::Always,
+                self.memo.as_ref().map(|m| {
+                    let code = fill[0] as u32
+                        | (fill[1] as u32) << 8
+                        | (op as u32) << 16
+                        | (self.keep_collinear as u32) << 24;
+                    (m, code)
+                }),
             )
         {
             return Ok(tree);

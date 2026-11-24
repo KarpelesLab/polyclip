@@ -20,6 +20,9 @@ output), usable as a standalone crate.
 - **Offsetting**: polygons with holes (round, miter, bevel, square joins), open paths
   (round, square, butt caps; closed loops), opening/closing for minimum-width enforcement,
   curved shapes.
+- **Memo**: a `Memo` keeps the results of the independent parts of booleans and offsets,
+  so that an operation on input that mostly repeats an earlier one (a zone poured again
+  after a few tracks moved) only computes what changed, with the same output.
 - **Incremental zone refill**: `ZoneFill` adds/removes/moves obstacles by id and updates
   the fill in well under a millisecond, with results identical to a full recompute.
 - **Curved booleans**: `curved_boolean` on `Shape`s keeps arcs as arcs (for Gerber/IPC-2581
@@ -104,9 +107,13 @@ the direction in which the segments are thinnest, including the dominant segment
 direction), and distance queries use direction-adaptive sweeps and bounding-volume
 hierarchies, so long, dense or parallel edges at any angle do not degrade into quadratic
 behaviour. Booleans split their input into clusters of rings that cannot interact (no
-edges within three units of each other) and compute each on its own, in parallel with `rayon`;
-a lone simple ring is only located and passed through, so a small operand meeting a few
-rings of a large one costs little more than reading it. Within one large cluster, every
+edges within three units of each other) and compute each on its own, in parallel with
+`rayon`; a lone simple ring is only located and passed through, so a small operand meeting
+a few rings of a large one costs little more than reading it. Clusters that are another
+one moved (the same pad or via at another place) are computed once, and a `Memo` keeps the
+results of clusters from one operation to the next: on the openings of the pours of a
+routed board, recorded while tracks were added (`examples/offset_bench.rs`), that is 1.15
+to 1.45 times as fast without a memo and 1.8 to 2.3 times with one. Within one large cluster, every
 phase runs in parallel with `rayon`: noding by leaf and segment ranges, fragment merging by
 `x` ranges, and the sweep in vertical bands joined at their common sides. The output is
 identical to computing everything at once, on any number of threads. Offsets build their raw curves in parallel with `rayon`, and a
@@ -135,8 +142,8 @@ without noding.
 
 - Property tests (`proptest`) for boolean identities, validity and canonical form,
   idempotence, offsets, distances, fracture, simplification, triangulation and
-  decomposition; clustered booleans are checked bit for bit against the one-piece
-  computation, and the parallel boolean engine against the original sequential one.
+  decomposition; clustered booleans, and results reused for repeated clusters or taken
+  from a `Memo`, are checked bit for bit against the one-piece computation, and the parallel boolean engine against the original sequential one.
 - Differential testing against Clipper2 (as an oracle only) in the separate `oracle/`
   crate.
 - Fuzzing of every public operation with `cargo-fuzz` (`fuzz/`), run weekly in CI.
