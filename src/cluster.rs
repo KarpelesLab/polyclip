@@ -49,7 +49,7 @@ use crate::query::ring_area2;
 const REACH: i64 = 3;
 /// Smaller inputs are always computed in one piece.
 const MIN_EDGES: usize = 1024;
-/// Consecutive edges per chunk box.
+/// Consecutive edges per chunk box, at most (see [`chunk_len`]).
 const CHUNK: usize = 16;
 /// Edges per block in the simplicity check of lone rings.
 const BLOCK: usize = 8;
@@ -105,8 +105,17 @@ fn within_reach(a: (Point, Point), b: (Point, Point)) -> bool {
         || point_segment_dist2(b.1, a.0, a.1) <= r2
 }
 
+/// Consecutive edges per chunk box of a ring of `n` edges: [`CHUNK`], and fewer in a ring
+/// of few edges, down to one. The few edges of a small ring may be long (a board outline of
+/// four edges, with every other ring inside it): one box over them all would meet
+/// everything, where the box of each side meets little.
+#[inline]
+fn chunk_len(n: usize) -> usize {
+    (n / 8).clamp(1, CHUNK)
+}
+
 /// The input rings: edge ranges, bounding boxes, and for every ring a binary tree of boxes
-/// over its chunks of [`CHUNK`] consecutive edges.
+/// over its chunks of [`chunk_len`] consecutive edges.
 struct Rings<'a> {
     edges: &'a [InEdge],
     start: Vec<u32>,
@@ -123,7 +132,7 @@ impl<'a> Rings<'a> {
         let mut start = Vec::with_capacity(ring_starts.len() + 1);
         let mut bbox = Vec::with_capacity(ring_starts.len());
         let mut tree_start = Vec::with_capacity(ring_starts.len() + 1);
-        let mut tree = Vec::with_capacity(2 * (edges.len() / CHUNK + ring_starts.len()));
+        let mut tree = Vec::with_capacity(2 * (edges.len() / CHUNK + 8 * ring_starts.len()));
         tree_start.push(0);
         for (i, &s) in ring_starts.iter().enumerate() {
             let e = ring_starts.get(i + 1).map_or(edges.len(), |&e| e as usize);
@@ -132,11 +141,12 @@ impl<'a> Rings<'a> {
                 continue;
             }
             start.push(s as u32);
-            let m = (e - s).div_ceil(CHUNK);
+            let len = chunk_len(e - s);
+            let m = (e - s).div_ceil(len);
             let base = tree.len();
             let none = Rect::new(edges[s].a, edges[s].a);
             tree.resize(base + m, none);
-            for c in edges[s..e].chunks(CHUNK) {
+            for c in edges[s..e].chunks(len) {
                 let mut b = Rect::new(c[0].a, c[0].b);
                 for x in &c[1..] {
                     b.add_point(x.b);
@@ -177,7 +187,12 @@ impl<'a> Rings<'a> {
         let ma = (self.tree_start[a + 1] as usize - ta) / 2;
         let mb = (self.tree_start[b + 1] as usize - tb) / 2;
         let (ea, eb) = (self.edges(a), self.edges(b));
-        let chunk = |e: &'a [InEdge], k: usize| &e[k * CHUNK..((k + 1) * CHUNK).min(e.len())];
+        let chunk = |e: &'a [InEdge], k: usize| {
+            let len = chunk_len(e.len());
+            &e[k * len..((k + 1) * len).min(e.len())]
+        };
+        // Edges of the chunk of `b` at hand whose boxes are within reach of the chunk of `a`.
+        let mut close = [(Point::new(0, 0), Point::new(0, 0)); CHUNK];
         stack.clear();
         stack.push((1, 1));
         while let Some((i, j)) = stack.pop() {
@@ -190,16 +205,29 @@ impl<'a> Rings<'a> {
             }
             match (i >= ma, j >= mb) {
                 (true, true) => {
-                    for e in chunk(ea, i - ma) {
+                    // Each chunk's edges against the other chunk's box first: the edges of
+                    // a chunk with a large box (a few long edges) are then not each tried
+                    // with every edge of the other.
+                    let (ca, cb) = (chunk(ea, i - ma), chunk(eb, j - mb));
+                    *work += ca.len() + cb.len();
+                    let mut n = 0;
+                    for f in cb {
+                        if ga.intersects(&Rect::new(f.a, f.b)) {
+                            close[n] = (f.a, f.b);
+                            n += 1;
+                        }
+                    }
+                    if n == 0 {
+                        continue;
+                    }
+                    for e in ca {
                         let ge = Rect::new(e.a, e.b).expand(REACH);
                         if !ge.intersects(&bb) {
                             continue;
                         }
-                        for f in chunk(eb, j - mb) {
+                        for &f in &close[..n] {
                             *work += 1;
-                            if ge.intersects(&Rect::new(f.a, f.b))
-                                && within_reach((e.a, e.b), (f.a, f.b))
-                            {
+                            if ge.intersects(&Rect::new(f.0, f.1)) && within_reach((e.a, e.b), f) {
                                 return true;
                             }
                         }
@@ -246,7 +274,8 @@ fn find_clusters(rings: &Rings<'_>, force: bool) -> Option<Clusters> {
     let axis = |p: Point| if sw <= sh { p.x } else { p.y };
     let mut order: Vec<u32> = (0..n as u32).collect();
     order.sort_unstable_by_key(|&r| (axis(rings.bbox[r as usize].min), r));
-    let budget = 8 * rings.edges.len() + 4096;
+    // A box test is a hundredth of what an edge costs computed in one piece.
+    let budget = 16 * rings.edges.len() + 4096;
     let mut work = 0usize;
     let mut uf = UnionFind((0..n as u32).collect());
     let mut active: Vec<u32> = Vec::new();
